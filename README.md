@@ -54,8 +54,8 @@ uv.lock                 Locked dependency versions
 
 ```bash
 # Clone the repository
-git clone https://github.com/yogasrivarshan/CUCo.git
-cd CUCo
+git clone https://github.com/UT-AiInfra/cuco.git
+cd cuco
 
 # Create virtual environment and install
 python3 -m venv .venv
