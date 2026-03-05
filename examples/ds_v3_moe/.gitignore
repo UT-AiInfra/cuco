@@ -1,0 +1,18 @@
+# Compiled binaries (208MB each with static NCCL)
+build/ds_v3_moe
+build/ds_v3_moe_*
+_transform_host_output/ds_v3_moe_test
+_transform_host_work/cuda_program
+results_ds_v3_moe/**/ds_v3_moe
+
+# Python cache
+__pycache__/
+*.pyc
+
+# SQLite WAL files
+*.sqlite-shm
+*.sqlite-wal
+
+# Build artifacts
+*.o
+*.so

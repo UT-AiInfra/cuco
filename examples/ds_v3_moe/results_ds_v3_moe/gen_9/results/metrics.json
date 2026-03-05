@@ -1,0 +1,20 @@
+{
+  "combined_score": 83.85297722091948,
+  "public": {
+    "time_ms": 118.25634999999998,
+    "max_time_ms": 141.8301,
+    "rank0_time_ms": 141.8301,
+    "rank0_tokens": 6144,
+    "rank1_time_ms": 47.5351,
+    "rank1_tokens": 2048,
+    "build_duration_sec": 6.721077881054953,
+    "all_run_times_ms": [
+      118.57717499999998,
+      118.25634999999998
+    ]
+  },
+  "private": {
+    "stdout_excerpt": "DeepSeek-V3 MoE SPARSE Config (GIN sequential):\n  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}\n  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens\n  ranks=2, hidden=7168, intermediate=2048\n  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]\n\n--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---\nTime: 141.8301 ms\nPhase: dispatch_put = 0.0696 ms\nPhase: dispatch_self_copy = 0.1772 ms\nPhase: self_compute = 67.0597 ms\nPhase: dispatch_wait = 67.1867 ms\nPhase: remote_compute = 67.2768 ms\nPhase: combine_put = 0.0205 ms\nPhase: combine_self_copy = 0.1382 ms\nPhase: combine_wait = 7.2520 ms\nVerification: PASS (max error: 0.001410)\n\n--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---\nTime: 47.5351 ms\nPhase: dispatch_put = 0.0584 ms\nPhase: dispatch_self_copy = 0.1044 ms\nPhase: self_compute = 22.4748 ms\nPhase: dispatch_wait = 22.5382 ms\nPhase: remote_compute = 22.4799 ms\nPhase: combine_put = 0.0225 ms\nPhase: combine_self_copy = 0.0666 ms\nPhase: combine_wait = 2.4177 ms\n"
+  },
+  "text_feedback": "Kernel time (token-weighted): 118.2563 ms. Lower is better. Combined score: 83.85.\nPer-rank: Rank0=141.8301 ms (6144 tokens), Rank1=47.5351 ms (2048 tokens). Max=141.8301 ms.\nRun times: 118.5772, 118.2563 ms (spread: 0.3208 ms, 0.3%). Using best: 118.2563 ms.\nREGRESSION. Best so far: 83.88 (yours: 83.85, 0.0% worse). Try smaller incremental changes.\n\nPer-phase timings:\n  dispatch_put: 0.0696 ms\n  dispatch_self_copy: 0.1772 ms\n  self_compute: 67.0597 ms\n  dispatch_wait: 67.1867 ms\n  remote_compute: 67.2768 ms\n  combine_put: 0.0205 ms\n  combine_self_copy: 0.1382 ms\n  combine_wait: 7.2520 ms\n  dispatch_put: 0.0584 ms\n  dispatch_self_copy: 0.1044 ms\n  self_compute: 22.4748 ms\n  dispatch_wait: 22.5382 ms\n  remote_compute: 22.4799 ms\n  combine_put: 0.0225 ms\n  combine_self_copy: 0.0666 ms\n  combine_wait: 2.4177 ms\n\nLLM Suggestions:\n## Analysis\n\n**Strategy Used:** Sequential pipeline with split PUT/WAIT kernels. The program issues GIN puts, does self-compute, then waits for remote data before processing it.\n\n**Critical Path Bottleneck:** Rank 0 dominates at 141.8ms. The breakdown shows:\n- `self_compute` (67ms) runs while `dispatch_wait` (67ms) blocks \u2014 these overlap well\n- `remote_compute` (67ms) runs **after** the wait completes \u2014 this is serialized\n- Total \u2248 67ms (overlapped) + 67ms (remote_compute) + 7ms (combine_wait) \u2248 141ms\n\nThe problem: **remote_compute cannot start until dispatch_wait completes**, but the remote data arrives during self_compute. The wait is blocking useful work.\n\n## Suggestions\n\n1. **Pipeline remote_compute with combine communication:** After `dispatch_wait`, immediately issue `combine_put` for completed tiles while computing remaining tiles. Currently combine_put waits until all remote_compute finishes \u2014 this serializes 67ms of compute before the 7ms combine_wait.\n\n2. **Overlap dispatch_wait with partial remote_compute:** Instead of waiting for ALL incoming data, use per-peer signals. Start computing on data from peer 0 as soon as it arrives, while peer 1's data is still in flight. This requires splitting the signal into per-peer signals (ginSignalCount >= nranks).\n\n3. **Fuse self_compute and remote_compute phases:** Since both process independent token batches, launch them concurrently on separate streams. Self-tokens don't depend on dispatch_wait; remote tokens do. This could reduce Rank 0's time from ~141ms to ~74ms (max of the two compute paths + combine overhead)."
+}

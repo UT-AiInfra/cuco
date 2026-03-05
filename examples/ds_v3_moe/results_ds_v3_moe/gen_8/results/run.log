@@ -1,0 +1,80 @@
+=== Run 1 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+Phase: dispatch_put = 9.2252 ms
+Phase: dispatch_wait = 0.0225 ms
+Phase: self_dequant = 0.0502 ms
+Phase: self_gemm1 = 14.8869 ms
+Phase: self_swiglu = 0.0225 ms
+Phase: self_gemm2 = 7.5284 ms
+Phase: remote_dequant = 22.5075 ms
+Phase: remote_gemm1 = 14.8879 ms
+Phase: remote_swiglu = 0.0225 ms
+Phase: remote_gemm2 = 7.5264 ms
+Phase: combine_put = 12.7816 ms
+Phase: combine_wait = 0.0143 ms
+Phase: dispatch_put = 34.2845 ms
+Phase: dispatch_wait = 0.0236 ms
+Phase: self_dequant = 0.1249 ms
+Phase: self_gemm1 = 44.4887 ms
+Phase: self_swiglu = 0.0614 ms
+Phase: self_gemm2 = 22.4051 ms
+Phase: remote_dequant = 67.1724 ms
+Phase: remote_gemm1 = 44.4836 ms
+Phase: remote_swiglu = 0.0604 ms
+Phase: remote_gemm2 = 22.4256 ms
+Phase: combine_put = 39.9421 ms
+Phase: combine_wait = 0.0143 ms
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 208.4383 ms
+Verification: PASS (max error: 0.001410)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 67.0259 ms
+
+
+
+=== Run 2 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+Phase: dispatch_put = 9.2129 ms
+Phase: dispatch_wait = 0.0236 ms
+Phase: self_dequant = 0.0502 ms
+Phase: self_gemm1 = 14.8869 ms
+Phase: self_swiglu = 0.0225 ms
+Phase: self_gemm2 = 7.5274 ms
+Phase: remote_dequant = 22.5065 ms
+Phase: remote_gemm1 = 14.8879 ms
+Phase: remote_swiglu = 0.0225 ms
+Phase: remote_gemm2 = 7.5274 ms
+Phase: combine_put = 12.7877 ms
+Phase: combine_wait = 0.0133 ms
+Phase: dispatch_put = 34.3583 ms
+Phase: dispatch_wait = 0.0246 ms
+Phase: self_dequant = 0.1239 ms
+Phase: self_gemm1 = 44.4826 ms
+Phase: self_swiglu = 0.0604 ms
+Phase: self_gemm2 = 22.4041 ms
+Phase: remote_dequant = 67.1631 ms
+Phase: remote_gemm1 = 44.4805 ms
+Phase: remote_swiglu = 0.0604 ms
+Phase: remote_gemm2 = 22.5382 ms
+Phase: combine_put = 39.8602 ms
+Phase: combine_wait = 0.0133 ms
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 208.5274 ms
+Verification: PASS (max error: 0.001410)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 67.2604 ms
+
+
+

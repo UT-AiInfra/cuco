@@ -1,0 +1,7 @@
+
+/mnt/nfs/yoga/cufuse/cuda_evolve/examples/ds_v3_moe_gin_2GPU_internode/results_ds_v3_moe/gen_1/ds_v3_moe.cu(650): warning #177-D: variable "tok_off" was declared but never referenced
+          size_t tok_off = (size_t)src * max_chunk_tokens;
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+

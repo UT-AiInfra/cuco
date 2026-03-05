@@ -1,0 +1,26 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Egg info
+*.egg-info/
+
+# Environment secrets
+.env
+
+# SQLite WAL files
+*.sqlite-shm
+*.sqlite-wal
+
+# Compiled binaries (ELF executables)
+build/ds_v3_moe
+build/ds_v3_moe_gin_sparse
+build/ds_v3_moe_internode
+_transform_host_work/cuda_program
+_transform_host_output/ds_v3_moe_test
+results_*/best/ds_v3_moe
+results_*/gen_*/ds_v3_moe

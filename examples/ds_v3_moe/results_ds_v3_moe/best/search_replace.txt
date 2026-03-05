@@ -1,0 +1,95 @@
+<NAME>
+overlap_dispatch_wait_with_self_compute
+</NAME>
+
+<DESCRIPTION>
+Looking at the per-phase timings, the current program launches dispatch_wait immediately after dispatch_put on the comm_stream, but self_compute on compute_stream doesn't start until after self_copy_dispatch completes. The key insight is that self_compute processes LOCAL data (from self-copy), not remote data. Therefore, self_compute can run CONCURRENTLY with dispatch_wait.
+
+The best-performing prior program (83.88 score) had dispatch_wait taking 67.1ms which matched self_compute at 67.0ms - this suggests they were running in parallel and the wait was just polling while compute ran.
+
+The current program shows:
+- Rank 0: dispatch_wait=0.69ms, self_copy=0.76ms, self_compute=67.2ms (sequential)
+- The dispatch_wait finishes quickly (0.69ms) because the PUT kernel returns fast
+
+The issue is that self_copy_dispatch (0.76ms) is blocking the compute stream unnecessarily. We should:
+1. Move self_copy to run concurrently with dispatch_put (not after dispatch_wait)
+2. Start self_compute immediately after self_copy, without waiting for dispatch_wait
+3. Only wait for dispatch_wait before remote_compute
+
+This should hide the dispatch communication latency behind self_compute.
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    // --- TIMING: True overlapped execution ---
+    // Key insight: dispatch_wait takes ~same time as self_compute because the network
+    // transfer happens during self_compute. We overlap them on separate streams.
+    CUDA_CHECK(cudaEventRecord(ev_start, stream));
+
+    // PHASE 1a: Launch dispatch PUT on comm_stream (initiates transfers, returns quickly)
+    ginDispatchPutOnlyKernel<<<1, 32, 0, comm_stream>>>(
+        devComm, quant_send_win, quant_recv_win,
+        d_dispatch_send_bytes, d_dispatch_send_offsets, d_dispatch_recv_offsets);
+    CUDA_CHECK(cudaEventRecord(dispatch_put_done, comm_stream));
+
+    // PHASE 1b: IMMEDIATELY launch dispatch WAIT on comm_stream
+    // This starts polling for incoming data right away, overlapping with self_compute
+    ginDispatchWaitKernel<<<1, 32, 0, comm_stream>>>(devComm);
+    CUDA_CHECK(cudaEventRecord(dispatch_wait_done, comm_stream));
+
+    // PHASE 2a: Self-copy on compute_stream (no dependency on comm)
+    {
+        int blocks = (dispatch_self_elems + 255) / 256;
+        memcpyInt8Kernel<<<blocks, 256, 0, compute_stream>>>(
+            d_quant_recv + dispatch_self_offset,
+            d_quant_send + dispatch_self_offset,
+            dispatch_self_elems);
+    }
+
+    // PHASE 2b: Self-compute on compute_stream (runs CONCURRENTLY with dispatch_wait)
+=======
+    // --- TIMING: True overlapped execution ---
+    // Key insight: self_compute processes LOCAL data and can run concurrently with
+    // dispatch_wait which polls for REMOTE data. We overlap them on separate streams.
+    CUDA_CHECK(cudaEventRecord(ev_start, stream));
+
+    // PHASE 1a: Launch dispatch PUT on comm_stream (initiates transfers, returns quickly)
+    ginDispatchPutOnlyKernel<<<1, 32, 0, comm_stream>>>(
+        devComm, quant_send_win, quant_recv_win,
+        d_dispatch_send_bytes, d_dispatch_send_offsets, d_dispatch_recv_offsets);
+    CUDA_CHECK(cudaEventRecord(dispatch_put_done, comm_stream));
+
+    // PHASE 1b: Self-copy on compute_stream IMMEDIATELY (no dependency on comm)
+    // This runs concurrently with the network transfer
+    {
+        int blocks = (dispatch_self_elems + 255) / 256;
+        memcpyInt8Kernel<<<blocks, 256, 0, compute_stream>>>(
+            d_quant_recv + dispatch_self_offset,
+            d_quant_send + dispatch_self_offset,
+            dispatch_self_elems);
+    }
+
+    // PHASE 1c: Self-compute on compute_stream IMMEDIATELY after self-copy
+    // This runs CONCURRENTLY with network transfer (no wait needed for local data)
+>>>>>>> REPLACE
+</DIFF>
+
+<DIFF>
+<<<<<<< SEARCH
+    CUDA_CHECK(cudaEventRecord(self_compute_done, compute_stream));
+
+    // PHASE 3: Remote compute needs dispatch_wait_done (already recorded above)
+    // Wait for the dispatch data to arrive before processing remote chunk
+    CUDA_CHECK(cudaStreamWaitEvent(compute_stream, dispatch_wait_done, 0));
+=======
+    CUDA_CHECK(cudaEventRecord(self_compute_done, compute_stream));
+
+    // PHASE 2: Launch dispatch WAIT on comm_stream (polls while self_compute runs)
+    ginDispatchWaitKernel<<<1, 32, 0, comm_stream>>>(devComm);
+    CUDA_CHECK(cudaEventRecord(dispatch_wait_done, comm_stream));
+
+    // PHASE 3: Remote compute needs dispatch_wait_done
+    // Wait for the dispatch data to arrive before processing remote chunk
+    CUDA_CHECK(cudaStreamWaitEvent(compute_stream, dispatch_wait_done, 0));
+>>>>>>> REPLACE
+</DIFF>

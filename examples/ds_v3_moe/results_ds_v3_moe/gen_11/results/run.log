@@ -1,0 +1,64 @@
+=== Run 1 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 143.0026 ms
+Phase: dispatch_put = 0.0748 ms
+Phase: dispatch_wait = 0.6984 ms
+Phase: self_copy_dispatch = 0.8765 ms
+Phase: self_compute = 67.0679 ms
+Phase: remote_compute = 67.1877 ms
+Phase: self_copy_combine = 0.1188 ms
+Phase: combine_put = 0.0215 ms
+Phase: combine_wait = 7.7189 ms
+Verification: PASS (max error: 0.001410)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 49.7203 ms
+Phase: dispatch_put = 0.0492 ms
+Phase: dispatch_wait = 1.8964 ms
+Phase: self_copy_dispatch = 1.9917 ms
+Phase: self_compute = 22.4676 ms
+Phase: remote_compute = 22.4707 ms
+Phase: self_copy_combine = 0.0461 ms
+Phase: combine_put = 0.0225 ms
+Phase: combine_wait = 2.6962 ms
+
+
+
+=== Run 2 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 143.0579 ms
+Phase: dispatch_put = 0.0594 ms
+Phase: dispatch_wait = 0.6932 ms
+Phase: self_copy_dispatch = 0.8581 ms
+Phase: self_compute = 67.0546 ms
+Phase: remote_compute = 67.2635 ms
+Phase: self_copy_combine = 0.1188 ms
+Phase: combine_put = 0.0236 ms
+Phase: combine_wait = 7.7169 ms
+Verification: PASS (max error: 0.001410)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 49.4387 ms
+Phase: dispatch_put = 0.0655 ms
+Phase: dispatch_wait = 1.8913 ms
+Phase: self_copy_dispatch = 2.0060 ms
+Phase: self_compute = 22.4686 ms
+Phase: remote_compute = 22.4696 ms
+Phase: self_copy_combine = 0.0461 ms
+Phase: combine_put = 0.0215 ms
+Phase: combine_wait = 2.4115 ms
+
+
+

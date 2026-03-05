@@ -1,0 +1,30 @@
+{
+  "success": true,
+  "total_duration_sec": 210.17130807088688,
+  "num_iterations": 2,
+  "error": "",
+  "iterations": [
+    {
+      "iteration": 1,
+      "build_success": true,
+      "build_errors": "",
+      "run_success": true,
+      "verification_passed": true,
+      "time_ms": 192.3256,
+      "has_host_communication": true,
+      "judge_feedback": "",
+      "duration_sec": 103.78055048803799
+    },
+    {
+      "iteration": 2,
+      "build_success": true,
+      "build_errors": "",
+      "run_success": true,
+      "verification_passed": true,
+      "time_ms": 198.2382,
+      "has_host_communication": false,
+      "judge_feedback": "",
+      "duration_sec": 106.3385819629766
+    }
+  ]
+}

@@ -1,0 +1,938 @@
+database_config:
+  archive_size: 60
+  db_path: results_ds_v3_moe/evolution_db.sqlite
+  elite_selection_ratio: 0.3
+  embedding_model: text-embedding-3-small
+  enforce_island_separation: true
+  exploitation_alpha: 1.0
+  exploitation_ratio: 0.2
+  island_api_types: null
+  island_elitism: true
+  migration_graph: null
+  migration_interval: 8
+  migration_rate: 0.15
+  num_archive_inspirations: 3
+  num_beams: 5
+  num_islands: 2
+  num_top_k_inspirations: 3
+  parent_selection_lambda: 8.0
+  parent_selection_strategy: weighted
+evolution_config:
+  code_embed_sim_threshold: 0.995
+  embedding_model: bedrock-amazon.titan-embed-text-v1
+  init_program_path: ds_v3_moe.cu
+  init_program_paths_per_island: null
+  job_type: local
+  language: cuda
+  llm_dynamic_selection: null
+  llm_dynamic_selection_kwargs: {}
+  llm_kwargs:
+    max_tokens: 32768
+    temperatures:
+    - 0.0
+    - 0.2
+    - 0.5
+  llm_models:
+  - bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0
+  max_novelty_attempts: 5
+  max_parallel_jobs: 1
+  max_patch_attempts: 4
+  max_patch_resamples: 3
+  meta_llm_kwargs:
+    max_tokens: 8192
+    temperatures:
+    - 0.0
+  meta_llm_models:
+  - bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0
+  meta_max_recommendations: 5
+  meta_rec_interval: 8
+  novelty_llm_kwargs: {}
+  novelty_llm_models: null
+  num_generations: 25
+  patch_type_probs:
+  - 0.6
+  - 0.25
+  - 0.15
+  patch_types:
+  - diff
+  - full
+  - cross
+  pre_transform_agent: false
+  pre_transform_agent_model: sonnet
+  pre_transform_agent_prompt_builder: '<callable: _build_agent_prompt>'
+  pre_transform_agent_system_prompt: "You are an expert CUDA and NCCL programmer specializing\
+    \ in GPU-Initiated Networking (GIN).  You transform CUDA programs from host-side\
+    \ NCCL collectives to device-side GIN.\n\nBe methodical:\n1. Read and understand\
+    \ the source code first\n2. Plan the transformation\n3. Implement step by step\n\
+    4. Build, test, and fix any issues\n5. Do not give up \u2014 keep iterating until\
+    \ verification passes\n\nWhen you encounter errors:\n- Read error messages carefully\n\
+    - Check for common GIN pitfalls (wrong Coop for flush, missing __syncthreads,\
+    \ signal count mismatch)\n- Use the provided API reference to verify correct usage\n\
+    - Add debug prints if needed for runtime diagnosis\n"
+  pre_transform_dual: false
+  pre_transform_enabled: false
+  pre_transform_gin_island_idx: 1
+  pre_transform_judge_model: ''
+  pre_transform_lsa_island_idx: 0
+  pre_transform_lsa_nccl_api_docs: ''
+  pre_transform_lsa_reference_code_path: null
+  pre_transform_marker_model: null
+  pre_transform_max_iterations: 20
+  pre_transform_nccl_api_docs: "## NCCL Device API Overview\n\nHost-side setup is\
+    \ complete. Focus on device-kernel usage only.\n\n**Core Concepts:**\n- **LSA\
+    \ (Load/Store Accessible)**: Direct memory access to local GPU peers\n- **GIN\
+    \ (GPU-Initiated Networking)**: One-sided network transfers to remote GPUs\n-\
+    \ **Teams**: Subsets of ranks - World (all), LSA (local), Rail (network)\n- **Thread\
+    \ Groups**: Block (`ncclCoopCta`), Warp (`ncclCoopWarp`), Thread (`ncclCoopThread`)\n\
+    \n**Key Principles:**\n- Only use device APIs inside kernels (no host-side calls)\n\
+    - Synchronize appropriately between writes and reads\n\n\n## NCCL GIN (GPU-Initiated\
+    \ Networking) API Documentation\n\n### Overview\nThe GIN API enables device-initiated,\
+    \ one-sided network communication with remote peers.\nGIN is supported since NCCL\
+    \ 2.28.7. All operations are device-side only.\n\n### Core Components\n\n####\
+    \ ncclGin Class\n**Purpose**: Manages device-initiated one-sided network transfers\
+    \ to remote peers.\n\n**Constructor**:\n```cpp\nncclGin(ncclDevComm const &comm,\
+    \ int contextIndex)\n```\n\n**Parameters**:\n- `comm`: Device communicator created\
+    \ via `ncclDevCommCreate()`\n- `contextIndex`: Network communication channel identifier.\
+    \ Multiple contexts allow spreading traffic across connections to avoid bottlenecks.\n\
+    \n### Data Transfer Operations\n\n#### put\nExecutes a device-initiated, one-sided\
+    \ data transfer from local buffer to remote buffer on a peer.\n\n**Signature**:\n\
+    ```cpp\nvoid put(ncclTeam team, int peer,\n         ncclWindow_t dstWnd, size_t\
+    \ dstOffset,\n         ncclWindow_t srcWnd, size_t srcOffset,\n         size_t\
+    \ bytes,\n         RemoteAction remoteAction = ncclGin_None{},\n         LocalAction\
+    \ localAction = ncclGin_None{},\n         Coop coop = ncclCoopThread{},\n    \
+    \     DescriptorSmem descriptor = ncclGin_None{},\n         cuda::thread_scope\
+    \ alreadyReleased = cuda::thread_scope_thread,\n         cuda::thread_scope expected_scope\
+    \ = cuda::thread_scope_device)\n```\n\n**Key Parameters**:\n- `team`: Team handle\
+    \ (e.g., from `ncclTeamWorld()`)\n- `peer`: Target peer rank within the team\n\
+    - `dstWnd`, `dstOffset`: Destination window and offset\n- `srcWnd`, `srcOffset`:\
+    \ Source window and offset\n- `bytes`: Number of bytes to transfer\n- `remoteAction`:\
+    \ Optional signal increment on remote peer (e.g., `ncclGin_SignalInc{signalIndex}`)\n\
+    - `localAction`: Optional counter increment on local peer (e.g., `ncclGin_CounterInc{counterIndex}`)\n\
+    \n**Ordering Guarantee**: Visibility of attached signals implies visibility of\
+    \ the put data and all preceding puts to the same peer (when using the same GIN\
+    \ context).\n\n#### flush\nEnsures pending transfers are locally consumed, meaning\
+    \ their source buffers are safe to reuse.\n\n**Signature**:\n```cpp\nvoid flush(Coop\
+    \ coop, cuda::memory_order ord = cuda::memory_order_acquire)\n```\n\n### Signals\
+    \ (Remote Actions)\n\nSignals are 64-bit integer values manipulated atomically,\
+    \ used for remote notification.\nThe signal index type is a 32-bit identifier;\
+    \ the signal *value* read/written is 64-bit.\n\n#### Signal Types\n- `ncclGinSignal_t`:\
+    \ 32-bit signal index (`uint32_t`); the signal value is `uint64_t`\n- `ncclGin_SignalInc`:\
+    \ Increment signal by 1 on remote peer\n- `ncclGin_SignalAdd`: Add specific value\
+    \ to signal on remote peer\n\n#### Signal Methods\n\n**readSignal**: Read current\
+    \ signal value\n```cpp\nuint64_t readSignal(ncclGinSignal_t signal, int bits =\
+    \ 64,\n                    cuda::memory_order ord = cuda::memory_order_acquire)\n\
+    ```\n\n**waitSignal**: Wait until signal reaches at least the specified value\n\
+    ```cpp\nvoid waitSignal(Coop coop, ncclGinSignal_t signal, uint64_t least,\n \
+    \               int bits = 64, cuda::memory_order ord = cuda::memory_order_acquire)\n\
+    ```\n\n**resetSignal**: Reset signal to zero\n```cpp\nvoid resetSignal(ncclGinSignal_t\
+    \ signal)\n```\n\n**signal**: Send standalone signal without data transfer\n```cpp\n\
+    void signal(ncclTeam team, int peer, RemoteAction remoteAction,\n            Coop\
+    \ coop = ncclCoopThread{},\n            DescriptorSmem descriptor = ncclGin_None{},\n\
+    \            cuda::thread_scope alreadyReleased = cuda::thread_scope_thread,\n\
+    \            cuda::thread_scope expected_scope = cuda::thread_scope_device)\n\
+    ```\n\n**Rolling Comparison**: Signal comparisons use rolling logic to handle\
+    \ unsigned overflow.\n\n### Counters (Local Actions)\n\nCounters track local completion\
+    \ of operations, limited to 56-bit values.\n\n#### Counter Types\n- `ncclGinCounter_t`:\
+    \ 32-bit counter index (`uint32_t`); counter values are `uint64_t` (max 56 bits\
+    \ usable)\n- `ncclGin_CounterInc`: Increment counter locally on source peer\n\n\
+    #### Counter Methods\n\n**readCounter**: Read current counter value\n```cpp\n\
+    uint64_t readCounter(ncclGinCounter_t counter, int bits = 56,\n              \
+    \       cuda::memory_order ord = cuda::memory_order_acquire)\n```\n\n**waitCounter**:\
+    \ Wait until counter reaches at least the specified value\n```cpp\nvoid waitCounter(Coop\
+    \ coop, ncclGinCounter_t counter, uint64_t least,\n                 int bits =\
+    \ 56, cuda::memory_order ord = cuda::memory_order_acquire)\n```\n\n**resetCounter**:\
+    \ Reset counter to zero\n```cpp\nvoid resetCounter(ncclGinCounter_t counter)\n\
+    ```\n\n### GIN Barriers\n\n#### ncclGinBarrierSession\n**Purpose**: Network barrier\
+    \ synchronization across GIN-accessible peers.\n\n**Constructors**:\n```cpp\n\
+    // Rail-scoped barrier\nncclGinBarrierSession(Coop coop, ncclGin gin, ncclTeamTagRail\
+    \ tag, uint32_t index)\n\n// General-purpose barrier\nncclGinBarrierSession(Coop\
+    \ coop, ncclGin gin, ncclTeam team,\n                      ncclGinBarrierHandle\
+    \ handle, uint32_t index)\n```\n\n**sync Method**:\n```cpp\nvoid sync(Coop coop,\
+    \ cuda::memory_order order, ncclGinFenceLevel fence)\n```\n\n**Parameters**:\n\
+    - `order`: Memory ordering (`cuda::memory_order_relaxed`, `cuda::memory_order_release`,\
+    \ etc.)\n- `fence`: Fence level for GIN operations\n  - `ncclGinFenceLevel::Relaxed`:\
+    \ The only fence level in NCCL 2.28.9\n\n### Usage Patterns\n\n#### Basic GIN\
+    \ Put with Signal\n```cpp\nncclTeam world = ncclTeamWorld(devComm);\nncclGin gin\
+    \ { devComm, 0 };  // context 0\n\n// Read initial signal value\nuint64_t signalValue\
+    \ = gin.readSignal(signalIndex);\n\n// Issue puts to remote peers with signal\
+    \ increment\nfor (int r = 0; r < world.nRanks; ++r) {\n    if (r != world.rank)\
+    \ {\n        gin.put(world, r,\n                recvwin, recvOffset + world.rank\
+    \ * bytes,\n                sendwin, sendOffset + r * bytes,\n               \
+    \ bytes,\n                ncclGin_SignalInc{signalIndex});\n    }\n}\n\n// Wait\
+    \ for all remote peers to complete their puts\ngin.waitSignal(ncclCoopCta(), signalIndex,\
+    \ signalValue + numRemotePeers);\n\n// Flush to ensure source buffers can be reused\n\
+    gin.flush(ncclCoopCta());\n```\n\n#### GIN Barrier Pattern (World team \u2014\
+    \ general constructor)\n```cpp\n// World-team barrier requires the general constructor\
+    \ (ncclTeam + ncclGinBarrierHandle).\n// There is NO convenience constructor for\
+    \ ncclTeamTagWorld; only ncclTeamTagRail has one.\nncclGinBarrierSession<ncclCoopCta>\
+    \ bar {\n    ncclCoopCta(),\n    gin,                          // ncclGin instance\
+    \ (2nd arg)\n    ncclTeamWorld(devComm),       // ncclTeam (3rd arg)\n    devComm.railGinBarrier,\
+    \       // ncclGinBarrierHandle (4th arg)\n    blockIdx.x                    //\
+    \ barrier index (5th arg)\n};\n\n// Initial barrier with relaxed ordering\nbar.sync(ncclCoopCta(),\
+    \ cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);\n\n// Perform GIN operations...\n\
+    \n// Final barrier with release semantics\nbar.sync(ncclCoopCta(), cuda::memory_order_release,\
+    \ ncclGinFenceLevel::Relaxed);\n```\n\n#### GIN Barrier Pattern (Rail team \u2014\
+    \ convenience constructor)\n```cpp\nncclGinBarrierSession<ncclCoopCta> bar {\n\
+    \    ncclCoopCta(),\n    gin,                          // ncclGin instance\n \
+    \   ncclTeamTagRail{},            // convenience tag\n    blockIdx.x         \
+    \           // barrier index\n};\nbar.sync(ncclCoopCta(), cuda::memory_order_relaxed,\
+    \ ncclGinFenceLevel::Relaxed);\n```\n\n### Setup Requirements (Host-Side)\n\n\
+    Enable GIN support during communicator creation:\n```cpp\nncclDevCommRequirements\
+    \ reqs;\nmemset(&reqs, 0, sizeof(reqs));\nreqs.railGinBarrierCount = /* number\
+    \ needed */;\nreqs.ginSignalCount = /* number needed */;\nreqs.ginCounterCount\
+    \ = /* number needed */;\nncclDevCommCreate(comm, &reqs, &devComm);\n(void)cudaGetLastError();\
+    \  // MUST clear stale CUDA error left by ncclDevCommCreate\n```\n\nGIN is available\
+    \ when the NCCL communicator connects ranks over InfiniBand/RoCE.\nFor intra-node\
+    \ PCIe A100 GPUs, GIN uses GDAKI (GPU Direct Async Kernel-Initiated).\n\n\n##\
+    \ NCCL Pure GIN Code Examples (from official AlltoAll GIN example)\n\nThese patterns\
+    \ are taken from the NVIDIA NCCL repo `examples/06_device_api/02_alltoall_gin`.\n\
+    Use them when evolving GIN kernels for network-based, device-initiated communication.\n\
+    \n### Host-side: Device communicator creation (GIN only)\n\nCTA count must match\
+    \ railGinBarrierCount for proper barrier synchronization.\n\n```cpp\n#define NCCL_DEVICE_CTA_COUNT\
+    \ 1\n#define NCCL_DEVICE_THREADS_PER_CTA 512\n\nncclDevComm devComm;\nncclDevCommRequirements\
+    \ reqs;\nmemset(&reqs, 0, sizeof(reqs));\nreqs.railGinBarrierCount = NCCL_DEVICE_CTA_COUNT;\
+    \  // GIN barriers for network sync\nreqs.ginSignalCount = 1;                \
+    \            // GIN signals for completion\nNCCLCHECK(ncclDevCommCreate(comm,\
+    \ &reqs, &devComm));\n(void)cudaGetLastError();  // MUST clear stale CUDA error\
+    \ left by ncclDevCommCreate\n```\n\n### Host-side: Symmetric memory and window\
+    \ registration\n\nDevice API requires symmetric memory; use ncclMemAlloc and NCCL_WIN_COLL_SYMMETRIC.\n\
+    \n```cpp\nvoid* d_sendbuff;\nvoid* d_recvbuff;\nncclWindow_t send_win;\nncclWindow_t\
+    \ recv_win;\n\nNCCLCHECK(ncclMemAlloc(&d_sendbuff, size_bytes));\nNCCLCHECK(ncclMemAlloc(&d_recvbuff,\
+    \ size_bytes));\n\nNCCLCHECK(ncclCommWindowRegister(comm, d_sendbuff, size_bytes,\
+    \ &send_win, NCCL_WIN_COLL_SYMMETRIC));\nNCCLCHECK(ncclCommWindowRegister(comm,\
+    \ d_recvbuff, size_bytes, &recv_win, NCCL_WIN_COLL_SYMMETRIC));\n```\n\n### Device-side:\
+    \ GIN barrier (coordinate across ranks over network)\n\nGIN barriers enable cross-node\
+    \ synchronization from device code. Each block uses blockIdx.x\nas its barrier\
+    \ index so blocks can progress independently while coordinating with other nodes.\n\
+    \n```cpp\nncclGin gin { devComm, 0 };\nncclGinBarrierSession<ncclCoopCta> bar\
+    \ {\n    ncclCoopCta(),\n    gin,\n    ncclTeamWorld(devComm),\n    devComm.railGinBarrier,\n\
+    \    blockIdx.x\n};\nbar.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);\n\
+    ```\n\n### Device-side: readSignal before puts, waitSignal after (rolling value)\n\
+    \nRead initial signal value, issue puts that increment the remote signal, then\
+    \ wait until\nsignal reaches initialValue + number of expected increments.\n\n\
+    ```cpp\nunsigned int signalIndex = 0;\nuint64_t signalValue = gin.readSignal(signalIndex);\n\
+    \n// Issue puts (each put can use ncclGin_SignalInc{signalIndex})\nfor (int r\
+    \ = tid; r < devComm.nRanks; r += nthreads) {\n    gin.put(ncclTeamWorld(devComm),\
+    \ r,\n            recvwin, recvoffset + devComm.rank * size,\n            sendwin,\
+    \ sendoffset + r * size,\n            size, ncclGin_SignalInc{signalIndex});\n\
+    }\n\n// Wait for all remote puts to complete (rolling comparison handles overflow)\n\
+    gin.waitSignal(ncclCoopCta(), signalIndex, signalValue + devComm.nRanks);\ngin.flush(ncclCoopCta());\n\
+    ```\n\n### Device-side: Full pure GIN kernel sketch (AlltoAll-style)\n\n```cpp\n\
+    template <typename T>\n__global__ void PureGinAlltoAllKernel(ncclWindow_t sendwin,\
+    \ size_t sendoffset,\n                                      ncclWindow_t recvwin,\
+    \ size_t recvoffset,\n                                      size_t count, ncclDevComm\
+    \ devComm) {\n    int ginContext = 0;\n    unsigned int signalIndex = 0;\n   \
+    \ ncclGin gin { devComm, ginContext };\n    uint64_t signalValue = gin.readSignal(signalIndex);\n\
+    \n    ncclGinBarrierSession<ncclCoopCta> bar {\n        ncclCoopCta(), gin, ncclTeamWorld(devComm),\n\
+    \        devComm.railGinBarrier, blockIdx.x\n    };\n    bar.sync(ncclCoopCta(),\
+    \ cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);\n\n    int tid = threadIdx.x\
+    \ + blockIdx.x * blockDim.x;\n    int nthreads = blockDim.x * gridDim.x;\n   \
+    \ const size_t size = count * sizeof(T);\n\n    for (int r = tid; r < devComm.nRanks;\
+    \ r += nthreads) {\n        gin.put(ncclTeamWorld(devComm), r,\n             \
+    \   recvwin, recvoffset + devComm.rank * size,\n                sendwin, sendoffset\
+    \ + r * size,\n                size, ncclGin_SignalInc{signalIndex});\n    }\n\
+    \n    gin.waitSignal(ncclCoopCta(), signalIndex, signalValue + devComm.nRanks);\n\
+    \    gin.flush(ncclCoopCta());\n}\n```\n\n### When to use pure GIN (from official\
+    \ README)\n\n- Communication between ranks that cannot use LSA (e.g. different\
+    \ nodes)\n- Network-based collectives in multi-node environments\n- All communication\
+    \ must go through the network\n\n### Performance notes (from official README)\n\
+    \n- Signal-based completion enables asynchronous operation patterns\n- Multiple\
+    \ GIN contexts can improve parallel communication performance\n- CTA count must\
+    \ match railGinBarrierCount for proper barrier synchronization\n\n\n## NCCL Thread\
+    \ Groups (Cooperative Groups)\n\n### Overview\nThread groups specify which threads\
+    \ within a CTA participate in NCCL operations.\nMany device API functions take\
+    \ a cooperative group parameter.\n\n### Predefined Thread Groups\n\n**ncclCoopThread()**\
+    \ - Single thread participation\n**ncclCoopWarp()** - Warp-level (32 threads)\n\
+    **ncclCoopCta()** - Block-level (all threads) - **Most commonly used**\n\n###\
+    \ Usage Patterns\n\n#### Full CTA Synchronization (Most Common)\n```cpp\n// Create\
+    \ barrier with ncclCoopCta\nncclLsaBarrierSession<ncclCoopCta> lsaBar {\n    ncclCoopCta(),\
+    \ devComm, ncclTeamLsa(devComm),\n    devComm.lsaBarrier, blockIdx.x\n};\n\n//\
+    \ All threads synchronize\nlsaBar.sync(ncclCoopCta(), cuda::memory_order_release);\n\
+    gin.flush(ncclCoopCta());\n```\n\n#### Leader Thread Pattern\n```cpp\n// Only\
+    \ thread 0 issues operation\nif (threadIdx.x == 0) {\n    gin.put(world, peer,\
+    \ dstWnd, dstOffset, srcWnd, srcOffset, bytes,\n            ncclGin_SignalInc{signalIndex},\
+    \ {}, ncclCoopThread());\n}\n// All threads wait\ngin.waitSignal(ncclCoopCta(),\
+    \ signalIndex, expectedValue);\n```\n\n#### Warp-Level Operations\n```cpp\n//\
+    \ All 32 threads in each warp must participate when using ncclCoopWarp.\n// Do\
+    \ NOT guard with `if (threadIdx.x % 32 == 0)` \u2014 that would leave\n// only\
+    \ lane 0, which contradicts the warp cooperative group contract.\nint warpId =\
+    \ threadIdx.x / 32;\ngin.put(world, peer + warpId, dstWnd, dstOffset,\n      \
+    \  srcWnd, srcOffset, bytes,\n        ncclGin_SignalInc{signalIndex}, ncclGin_None{},\
+    \ ncclCoopWarp());\n```\n\n### Custom Thread Groups\n\nImplement custom groups\
+    \ by providing three methods:\n- `thread_rank()`: Thread identifier within group\n\
+    - `size()`: Total threads in group\n- `sync()`: Synchronization mechanism\n\n\
+    NCCL is also compatible with CUDA cooperative groups (`cooperative_groups::thread_block`,\
+    \ etc.).\n\n### Guidelines\n\n- **ncclCoopCta()**: Default choice for most operations,\
+    \ full block synchronization\n- **ncclCoopWarp()**: For warp-granular operations,\
+    \ performance optimization\n- **ncclCoopThread()**: Single thread operations,\
+    \ typically with leader thread pattern\n\n\n## NCCL Teams\n\n### Overview\nTeams\
+    \ represent subsets of ranks within an NCCL communicator for scoped communication.\n\
+    \n### Predefined Teams\n\n**ncclTeamWorld(devComm)** - All ranks in the communicator\
+    \ (global scope)\n**ncclTeamLsa(devComm)** - Ranks accessible via load/store operations\
+    \ (local GPU group)\n**ncclTeamRail(devComm)** - Ranks directly accessible over\
+    \ network (rail topology)\n\n### Team Structure\n\nThe `ncclTeam` type contains:\n\
+    - `nRanks`: Number of ranks in the team\n- `rank`: Current rank position within\
+    \ the team (0-indexed)\n- `stride`: Spacing between ranks\n\n**Properties**:\n\
+    - World and LSA teams are contiguous (stride = 1)\n- Rail teams are typically\
+    \ non-contiguous (stride = LSA team size)\n\n### Usage Patterns\n\n#### Accessing\
+    \ Team Properties\n```cpp\nncclTeam world = ncclTeamWorld(devComm);\nncclTeam\
+    \ lsa = ncclTeamLsa(devComm);\nncclTeam rail = ncclTeamRail(devComm);\n\n// Use\
+    \ team properties\nfor (int r = 0; r < world.nRanks; ++r) {\n    // Communicate\
+    \ with rank r in world team\n}\n\nfor (int lp = 0; lp < lsa.nRanks; ++lp) {\n\
+    \    // Access LSA peer lp\n    float* peer = (float*)ncclGetLsaPointer(window,\
+    \ offset, lp);\n}\n```\n\n#### Team-Scoped GIN Operations\n```cpp\nncclTeam world\
+    \ = ncclTeamWorld(devComm);\n\n// Put to specific peer in world team\ngin.put(world,\
+    \ peerRank, dstWnd, dstOffset, srcWnd, srcOffset, bytes,\n        ncclGin_SignalInc{signalIndex});\n\
+    ```\n\n#### Hybrid LSA + GIN Pattern\n```cpp\nncclTeam world = ncclTeamWorld(devComm);\n\
+    ncclTeam lsa = ncclTeamLsa(devComm);\n\n// The LSA team is contiguous in world\
+    \ rank space.\n// world.rank is this GPU's world rank; lsa.rank is this GPU's\
+    \ position\n// within the LSA team. The first world rank in the LSA group is:\n\
+    int lsaWorldStart = world.rank - lsa.rank;\n\n// Iterate over world, distinguish\
+    \ LSA vs non-LSA peers\nfor (int r = 0; r < world.nRanks; ++r) {\n    if (r >=\
+    \ lsaWorldStart && r < lsaWorldStart + lsa.nRanks) {\n        // Use LSA for this\
+    \ peer (convert world rank \u2192 LSA rank)\n        int lsaPeer = r - lsaWorldStart;\n\
+    \        float* peer = (float*)ncclGetLsaPointer(recvwin, offset, lsaPeer);\n\
+    \        peer[idx] = data;\n    } else {\n        // Use GIN for remote peer\n\
+    \        gin.put(world, r, recvwin, offset, sendwin, offset, bytes,\n        \
+    \        ncclGin_SignalInc{signalIndex});\n    }\n}\n```\n\n### Guidelines\n\n\
+    - **World team**: Use for global all-to-all communication or when addressing all\
+    \ ranks\n- **LSA team**: Use for direct memory access within local GPU group\n\
+    - **Rail team**: Use for optimized network topology communication (advanced)\n\
+    \n\n## nccl_device/gin.h \u2014 GIN Session API (authoritative header)\n\n```cpp\n\
+    // ncclGin (alias for ncclGin_BackendMask<NCCL_GIN_BACKEND_MASK_ALL>)\n//\n//\
+    \ Construct with: ncclGin gin(devComm, contextIndex);\n//   contextIndex is typically\
+    \ 0 (must be < ginContextCount in requirements).\n\n// Completion action types\
+    \ for put():\nstruct ncclGin_None {};                         // No remote action\
+    \ / no local action\nstruct ncclGin_SignalAdd { ncclGinSignal_t signal; uint64_t\
+    \ value; };\nstruct ncclGin_SignalInc { ncclGinSignal_t signal; };   // Equivalent\
+    \ to SignalAdd{+1}\n// SignalInc: for a given signal, all operations between successive\
+    \ reset()'s\n// must either all be SignalInc or all not SignalInc.\nstruct ncclGin_CounterInc\
+    \ { ncclGinCounter_t counter; };\nstruct ncclGin_DescriptorSmem { ncclGinDescriptorSmem*\
+    \ descriptor; };\n\n// ---- put (window+offset variant) ----\n// Puts bytes from\
+    \ local srcWnd+srcOffset to peer's dstWnd+dstOffset.\n// RemoteAction: signal\
+    \ action on the *receiver* when put completes. Signal is\n//   visible only after\
+    \ this put AND all preceding puts on this context to the\n//   same peer have\
+    \ settled.\n// LocalAction: action locally when source buffer has been consumed.\n\
+    // Coop: set of threads participating (default ncclCoopThread).\ntemplate<\n \
+    \ typename RemoteAction = ncclGin_None,\n  typename LocalAction = ncclGin_None,\n\
+    \  typename Coop = ncclCoopThread,\n  typename DescriptorSmem = ncclGin_None>\n\
+    void put(\n  ncclTeam, int peer,\n  ncclWindow_t dstWnd, size_t dstOffset,\n \
+    \ ncclWindow_t srcWnd, size_t srcOffset, size_t bytes,\n  RemoteAction = ncclGin_None{},\n\
+    \  LocalAction = ncclGin_None{},\n  Coop = ncclCoopThread{},\n  DescriptorSmem\
+    \ = ncclGin_None{},\n  cuda::thread_scope alreadyReleased = cuda::thread_scope_thread,\n\
+    \  cuda::thread_scope expected_scope = cuda::thread_scope_device) const;\n\n//\
+    \ ---- put (ncclSymPtr variant) ----\ntemplate<typename T, ...same template args...>\n\
+    void put(ncclTeam, int peer,\n  ncclSymPtr<T> dstElts, ncclSymPtr<T> srcElts,\
+    \ size_t nElts, ...) const;\n\n// ---- putValue (write a scalar <= 8 bytes to\
+    \ remote) ----\ntemplate<typename T, typename RemoteAction=ncclGin_None, typename\
+    \ Coop=ncclCoopThread, ...>\nvoid putValue(ncclTeam, int peer,\n  ncclWindow_t\
+    \ dstWnd, size_t dstOffset, T value, ...) const;\n\n// ---- signal (signal without\
+    \ data) ----\ntemplate<typename RemoteAction, typename Coop=ncclCoopThread, ...>\n\
+    void signal(ncclTeam, int peer, RemoteAction, Coop = ncclCoopThread(), ...) const;\n\
+    \n// ---- flush ----\n// All source buffers from put's from any thread in this\
+    \ coop will be safe to reuse.\n// Flush does NOT guarantee that data has settled\
+    \ in remote memory.\n// IMPORTANT: The Coop must match the threads that actually\
+    \ issued the puts.\n//   e.g. if only thread (0,0) issued puts, use ncclCoopThread,\
+    \ NOT ncclCoopCta.\ntemplate<typename Coop>\nvoid flush(Coop, cuda::memory_order\
+    \ ord = cuda::memory_order_acquire) const;\n\n// ---- Signal/Counter wait ----\n\
+    // Uses \"rolling\" comparison: rolling_less_equal(supplied, internal).\n// Counters\
+    \ use max 56 bits. Signals use 64 bits by default.\n\nuint64_t readCounter(ncclGinCounter_t\
+    \ counter, int bits=56, ...) const;\n\ntemplate<typename Coop>\nvoid waitCounter(Coop,\
+    \ ncclGinCounter_t counter, uint64_t least, int bits=56, ...) const;\n\n// Signal\
+    \ shadow: user-manipulable mirror of signal value.\nuint64_t* getSignalShadowPtr(ncclGinSignal_t\
+    \ signal) const;\nvoid increaseSignalShadow(ncclGinSignal_t signal, uint64_t delta)\
+    \ const;\n\nuint64_t readSignal(ncclGinSignal_t signal, int bits=64, ...) const;\n\
+    \n// Wait for signal to meet or exceed 'least'.\ntemplate<typename Coop>\nvoid\
+    \ waitSignal(Coop, ncclGinSignal_t signal, uint64_t least, int bits=64, ...) const;\n\
+    \n// Wait for signal to meet or exceed shadow value.\ntemplate<typename Coop>\n\
+    void waitSignalMeetShadow(Coop, ncclGinSignal_t signal, int bits=64, ...) const;\n\
+    \n// Wait until signal exceeds shadow by leastDelta, updates shadow, returns before/delta.\n\
+    template<typename Coop, typename Uint>\nvoid waitSignalFollowShadow(Coop, ncclGinSignal_t\
+    \ signal, Uint leastDelta,\n  Uint* before, Uint* delta, int bits=64, ...) const;\n\
+    \n// Reset (sets to zero). May NOT race with concurrent modifications.\nvoid resetCounter(ncclGinCounter_t\
+    \ counter) const;\nvoid resetSignal(ncclGinSignal_t signal) const;\n```\n\n\n\
+    ## nccl_device/core.h \u2014 Core types, teams, windows, ncclDevComm\n\n```cpp\n\
+    // Forward declarations\nstruct ncclDevComm;\nstruct ncclTeam;\n// ncclWindow_t\
+    \ is defined in nccl.h\n\ntypedef uint32_t ncclGinSignal_t;\ntypedef uint32_t\
+    \ ncclGinCounter_t;\n\n// ---- ncclTeam ----\nstruct ncclTeam {\n  int nRanks,\
+    \ rank, stride;\n};\n\n// ---- ncclDevCommRequirements ----\n// Passed to ncclDevCommCreate\
+    \ to configure the device communicator.\nstruct ncclDevCommRequirements {\n  ncclDevResourceRequirements_t*\
+    \ resourceRequirementsList;\n  ncclTeamRequirements_t* teamRequirementsList;\n\
+    \n  bool lsaMultimem;\n\n  int barrierCount;\n  int lsaBarrierCount;\n  int railGinBarrierCount;\
+    \      // Typically 1\n\n  int lsaLLA2ABlockCount, lsaLLA2ASlotCount;\n\n  bool\
+    \ ginForceEnable;\n  int ginContextCount;          // Hint; typically 1\n  int\
+    \ ginSignalCount;           // Must be >= number of distinct signal indices used\n\
+    \  int ginCounterCount;          // Must be >= number of distinct counter indices\
+    \ used\n};\n\n// Host-side create/destroy:\nncclResult_t ncclDevCommCreate(ncclComm_t,\
+    \ ncclDevCommRequirements_t const*, ncclDevComm_t* outDevComm);\nncclResult_t\
+    \ ncclDevCommDestroy(ncclComm_t, ncclDevComm_t const* devComm);\n\n// ---- Team\
+    \ API ----\nncclTeam ncclTeamWorld(ncclDevComm const&);   // All ranks\nncclTeam\
+    \ ncclTeamLsa(ncclDevComm const&);     // Local (NVLink) ranks\nncclTeam ncclTeamRail(ncclDevComm\
+    \ const&);    // Network rail ranks\n\nint ncclTeamRankToWorld(ncclDevComm const&,\
+    \ ncclTeam, int rank);\nint ncclTeamRankToLsa(ncclDevComm const&, ncclTeam, int\
+    \ rank);\nbool ncclTeamRankIsMember(ncclTeam_t a, ncclTeam_t b, int bPeer);\n\
+    int ncclTeamRankToTeam(ncclTeam_t a, ncclTeam_t b, int bPeer);\nint ncclTeamRankInDifference(ncclTeam_t\
+    \ parent, ncclTeam_t subset, int index);\nncclTeam_t ncclTeamInnerFactor(ncclTeam_t\
+    \ parent, int innerSize);\nncclTeam_t ncclTeamOuterFactor(ncclTeam_t parent, int\
+    \ innerSize);\n\n// ---- Window API ----\n// Get local pointer into a registered\
+    \ window at byte offset:\nvoid* ncclGetLocalPointer(ncclWindow_t w, size_t offset);\n\
+    // Get peer's pointer (requires LSA connectivity):\nvoid* ncclGetPeerPointer(ncclWindow_t\
+    \ w, size_t offset, int peer);\nvoid* ncclGetPeerPointer(ncclWindow_t w, size_t\
+    \ offset, ncclTeam tm, int peer);\n// LSA peer pointer:\nvoid* ncclGetLsaPointer(ncclWindow_t\
+    \ w, size_t offset, int peer);\n```\n\n\n## nccl_device/coop.h \u2014 Cooperative\
+    \ group types\n\n```cpp\n// NCCL cooperative group types (used as Coop template\
+    \ parameters for GIN calls).\n// Each type provides: thread_rank(), size(), num_threads(),\
+    \ sync().\n\n// ncclCoopThread \u2014 single thread (default for put/waitSignal)\n\
+    typedef ncclCoopTile<1> ncclCoopThread;\n\n// ncclCoopWarp \u2014 full 32-thread\
+    \ warp\ntypedef ncclCoopTile<32> ncclCoopWarp;\n\n// ncclCoopCta \u2014 entire\
+    \ CTA (threadblock)\nstruct ncclCoopCta {\n  int thread_rank() const { return\
+    \ threadIdx.x; }\n  int size() const { return blockDim.x; }\n  void sync() { __syncthreads();\
+    \ }\n};\n\n// ncclCoopTile<N> \u2014 aligned power-of-2 set of threads within\
+    \ a warp (N <= 32)\ntemplate<int nThreadsPow2>\nstruct ncclCoopTile {\n  int thread_rank()\
+    \ const;  // lane % nThreadsPow2\n  int size() const;         // nThreadsPow2\n\
+    \  void sync();              // __syncwarp(laneMask)\n};\n\n// ncclCoopLanes \u2014\
+    \ arbitrary subset of lanes in a warp\nstruct ncclCoopLanes {\n  uint32_t lmask;\n\
+    \  int thread_rank() const;  // popcount of lower lanes\n  int size() const; \
+    \        // popcount(lmask)\n  void sync();              // __syncwarp(lmask)\n\
+    };\n\n// ncclCoopWarpSpan \u2014 consecutive warps with unique id [0..15]\nstruct\
+    \ ncclCoopWarpSpan {\n  uint32_t warp0:8, nWarps:8, id:8;\n  int thread_rank()\
+    \ const;  // threadIdx.x - 32*warp0\n  int size() const;         // 32*nWarps\n\
+    \  void sync();              // __barrier_sync_count(1+id, 32*nWarps)\n};\n\n\
+    // Helper: get active/coalesced lanes\nncclCoopLanes ncclCoopCoalesced();  //\
+    \ __activemask()\n\n// IMPORTANT usage notes:\n// - flush(Coop): Coop must match\
+    \ the threads that issued puts.\n//   If only one thread issued puts, use ncclCoopThread,\
+    \ NOT ncclCoopCta.\n// - waitSignal(Coop, ...): ncclCoopThread is safest; ncclCoopCta\
+    \ can deadlock\n//   if not all CTA threads reach the wait.\n```\n\n\n## nccl_device/ptr.h\
+    \ \u2014 Symmetric pointer type\n\n```cpp\n// ncclSymPtr<T>: a window + byte offset\
+    \ pair for type-safe symmetric addressing.\n// Can be used with the ncclSymPtr\
+    \ variant of gin.put().\ntemplate<typename T>\nstruct ncclSymPtr {\n  ncclWindow_t\
+    \ window;\n  size_t offset;\n\n  ncclSymPtr(ncclWindow_t window = nullptr, size_t\
+    \ offset = 0);\n\n  // Arithmetic\n  ncclSymPtr<T>& operator+=(int/unsigned/long/...);\n\
+    \  ncclSymPtr<T>& operator-=(int/unsigned/long/...);\n\n  // Device-side pointer\
+    \ resolution\n  T* localPtr() const;          // Local pointer\n  T* lsaPtr(int\
+    \ peer) const;    // LSA peer pointer\n  T* peerPtr(int peer) const;   // Peer\
+    \ pointer\n  T* peerPtr(ncclTeam team, int peer) const;\n  T* multimemPtr(ncclMultimemHandle\
+    \ mmHandle) const;\n  T* lsaMultimemPtr(ncclDevComm const&) const;\n};\n```\n\n\
+    \n## nccl_device/gin_barrier.h \u2014 GIN barrier API\n\n```cpp\n// GIN fence\
+    \ levels\nenum class ncclGinFenceLevel {\n  Relaxed\n};\n\n// Host-side: create\
+    \ barrier requirement\nncclResult_t ncclGinBarrierCreateRequirement(\n  ncclComm_t,\
+    \ ncclTeam_t, int nBarriers,\n  ncclGinBarrierHandle_t* outHandle,\n  ncclDevResourceRequirements_t*\
+    \ outReq);\n\n// Device-side barrier session\ntemplate<typename Coop>\nstruct\
+    \ ncclGinBarrierSession {\n  // Constructors\n  ncclGinBarrierSession(Coop, ncclGin,\
+    \ ncclTeam, ncclGinBarrierHandle, uint32_t index);\n  ncclGinBarrierSession(Coop,\
+    \ ncclGin, ncclTeamTagRail, uint32_t index);\n\n  // Not copyable\n  ncclGinBarrierSession(ncclGinBarrierSession\
+    \ const&) = delete;\n\n  // Synchronize all team members\n  void sync(Coop, cuda::memory_order,\
+    \ ncclGinFenceLevel);\n};\n```\n"
+  pre_transform_pipeline_steps: []
+  pre_transform_reference_code_path: ''
+  pre_transform_rewrite_model: bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0
+  pre_transform_stage_a_max_iterations: 5
+  pre_transform_stage_b_max_iterations: 10
+  pre_transform_two_stage: true
+  pre_transform_warmup_model: bedrock/us.anthropic.claude-opus-4-5-20251101-v1:0
+  pre_transform_warmup_prompt: ''
+  reference_code_per_island: null
+  results_dir: results_ds_v3_moe
+  task_sys_msg: "You are an expert in CUDA and NCCL GIN (GPU Integrated Networking)\
+    \ kernels.\nImprove the given CUDA program to minimize kernel runtime (Time in\
+    \ ms printed by the program).\n\nAnalyze the current program structure, identify\
+    \ bottlenecks (sequential execution, missing overlap, cold-start penalties, etc.),\
+    \ and apply the optimization strategies described below. You have full autonomy\
+    \ over the approach \u2014 choose whichever strategy or combination best fits\
+    \ this workload.\n\n## Evolve Block Structure\n\nThe file contains EVOLVE-BLOCK\
+    \ regions delimited by EVOLVE-BLOCK-START and\nEVOLVE-BLOCK-END markers. You have\
+    \ FULL AUTONOMY over code inside these blocks:\n  - **Kernel definitions block**:\
+    \ All __global__ and __device__ functions.\n    You may add, remove, fuse, split,\
+    \ or completely rewrite any kernel here.\n  - **Infrastructure + Pipeline block**:\
+    \ Stream creation, memory allocation,\n    window registration, DevComm setup,\
+    \ warmup, and the entire timed\n    execution pipeline (all kernel launches, synchronization,\
+    \ event management).\n    You may restructure the pipeline freely: reorder operations,\
+    \ add/remove\n    streams, change launch configs, create events, etc.\n\n## Hard\
+    \ Constraints\n- Only modify code between EVOLVE-BLOCK-START and EVOLVE-BLOCK-END\
+    \ markers.\n- Preserve any variable names that are referenced in FROZEN sections\
+    \ (outside\n  the evolve blocks). Read the frozen sections carefully to identify\
+    \ these.\n- Do NOT duplicate top-level function definitions that already exist.\n\
+    - Communication warmup is already included in the seed. Do NOT remove the\n  warmup\
+    \ section \u2014 it eliminates 10-50ms of lazy RDMA/NIC initialization\n  that\
+    \ would otherwise inflate timing.\n- Correctness: the program must print \"Verification:\
+    \ PASS\".\n- The evaluator compiles with nvcc and runs the binary via mpirun.\n\
+    \  Lower \"Time: X.XXXX ms\" gives higher combined_score.\n- Do NOT use external\
+    \ libraries (cuBLAS, cuDNN, cuSPARSE, Thrust, CUB, etc.).\n  The build links ONLY\
+    \ cuda, nccl, and mpi. Any #include or call to an\n  external library will fail\
+    \ at compile time. All compute must use\n  hand-written CUDA kernels.\n- Do NOT\
+    \ modify the GEMM or compute internals of existing compute kernels (matmul, activation,\
+    \ etc.). Focus on pipeline and overlap improvements.\n\n## What You CAN Change\
+    \ (if not done already)\n- Fuse compute and communication into a single persistent\
+    \ kernel\n- Create multiple CUDA streams with priorities\n- Reorder kernel launches\
+    \ to overlap compute and communication\n- Split communication into separate put/wait\
+    \ kernels\n- Add or remove cudaEvent synchronization between streams\n- Change\
+    \ ncclDevCommRequirements (ginContextCount, ginSignalCount, etc.)\n- Change kernel\
+    \ launch configurations (blocks, threads, cooperative launch)\n- Add entirely\
+    \ new kernels\n- Merge or split existing kernels\n- Use vectorized memory access\
+    \ (int4, float4)\n\n\n## Choosing the Right Fusion Level\n\nThere is no single\
+    \ best strategy. The right level of compute-communication\nfusion depends entirely\
+    \ on the workload's data-dependency structure. You\nmust analyze the program and\
+    \ decide. Here is the decision framework:\n\n### Kernel-Level Fusion\n\nFuse compute\
+    \ and communication into a **single persistent kernel** when:\n  - The workload\
+    \ is **iterative**: each step produces a small chunk of\n    output that another\
+    \ rank consumes before the next step can proceed.\n  - Per-chunk data is **small**\
+    \ relative to the compute on that chunk,\n    so kernel launch overhead between\
+    \ steps would dominate.\n  - The produce \u2192 send \u2192 receive \u2192 consume\
+    \ cycle is the **inner loop**\n    itself, not a one-shot bulk transfer.\n\nImplementation\
+    \ patterns:\n  - **Warp specialization**: Reserve 1-2 CTAs for communication,\
+    \ remaining\n    CTAs compute. Sync via device-side flags or atomics.\n  - **Tile-and-send**:\
+    \ After each output tile, immediately issue the\n    transfer; overlap the next\
+    \ tile's compute with the previous transfer.\n  - **Cooperative launch**: Grid\
+    \ spanning all SMs, block roles assigned\n    at launch (compute blocks vs. communication\
+    \ blocks).\n\n### Stream-Level Overlap\n\nUse **separate CUDA streams** for compute\
+    \ and communication when:\n  - The workload has **large, self-contained compute\
+    \ phases** (each big\n    enough to saturate the GPU for milliseconds) separated\
+    \ by **bulk\n    communication phases**.\n  - The compute kernels are already\
+    \ highly optimized and fusing them into\n    a communication kernel would **sacrifice\
+    \ their tiling, shared-memory\n    reuse, or register-level optimizations**.\n\
+    \  - Communication is a **one-shot bulk transfer**, not a fine-grained\n    iterative\
+    \ exchange \u2014 so there is no benefit to tile-level interleaving.\n\nImplementation:\
+    \ high-priority stream for communication, default stream\nfor compute, cudaEventRecord\
+    \ + cudaStreamWaitEvent for cross-stream sync.\n\n### Split Communication Kernels\n\
+    \nBreak a monolithic communication kernel into separate **PUT (initiate)**\nand\
+    \ **WAIT (complete)** launches when:\n  - You want to **start sending as early\
+    \ as possible** and defer the wait\n    until the received data is actually consumed.\n\
+    \  - There is useful compute work between the send and the receive that\n    can\
+    \ fill the overlap window.\n\nSplit structure:\n  - **PUT kernel**: 1 block, 32\
+    \ threads \u2014 issues all transfers, returns\n    immediately.\n  - (intervening\
+    \ compute overlaps with the network transfer)\n  - **WAIT kernel**: 1 block, 32\
+    \ threads \u2014 polls until transfers land.\n\n### Combining Strategies\n\nThese\
+    \ approaches are composable. A single program can use:\n  - Stream-level overlap\
+    \ for the outer pipeline\n  - A fused kernel for a specific phase that has iterative\
+    \ structure\n  - Split put/wait for a bulk transfer that bookends a compute phase\n\
+    \nThe key question: look at the data-dependency graph. Where do you produce\n\
+    data that must travel to another rank? How much independent local work\nexists\
+    \ between that produce and the point where you consume the reply?\n\n### Contention\
+    \ Awareness\n\nGPU resources are shared between compute and communication:\n \
+    \ - **SMs**: Compute-heavy kernels saturate all SMs. Communication kernels\n \
+    \   that occupy many SMs steal compute throughput.\n  - **HBM bandwidth**: Compute\
+    \ and device-side memory copies compete for\n    the same bandwidth.\n  - **NIC\
+    \ DMA** (GIN): Transfers are offloaded to the NIC's DMA engine,\n    which operates\
+    \ independently of SMs and HBM \u2014 this is why GIN\n    communication can overlap\
+    \ with compute without contention.\n  - **NVLink** (LSA): Peer stores share NVLink\
+    \ bandwidth with compute\n    peer-memory accesses. LSA barrier sync requires\
+    \ dedicated CTAs.\n\nDesign suggestion: communication kernels should use minimal\
+    \ GPU resources\n(1 block, 32 threads). The fewer SMs communication occupies,\
+    \ the more\ncompute throughput is preserved.\n\n### Event-Based Synchronization\n\
+    \nUse cudaEventRecord + cudaStreamWaitEvent for cross-stream dependencies.\nAvoid\
+    \ cudaStreamSynchronize \u2014 it blocks the host and serializes all GPU\nwork.\
+    \ Events let stream B wait for a specific point in stream A without\nblocking\
+    \ anything else.\n\n\n## GIN API Rules (correctness)\n\n- GIN windows MUST use\
+    \ ncclMemAlloc. Do not switch to cudaMalloc for\n  registered buffers.\n- ncclDevCommRequirements:\
+    \ ginSignalCount must be >= the number of distinct\n  signal indices used in ncclGin_SignalInc\
+    \ and waitSignal calls.\n- There is no ncclGin_NoSignal. Use ncclGin_SignalInc{unsigned_index}.\n\
+    \  Put completion increments the RECEIVER's signal at that index.\n- waitSignal(Coop,\
+    \ signal_index, count): waits until THIS RANK's signal\n  reaches count. Use ncclCoopThread()\
+    \ for Coop.\n- flush(Coop): must match the threads that issued puts (ncclCoopThread\n\
+    \  if a single thread issued them).\n- __syncthreads() required between buffer\
+    \ writes and GIN puts.\n\n## Synchronization: Barrier vs Signal-Shadow\n\nncclGinBarrierSession\
+    \ + bar.sync() is a GLOBAL cross-rank barrier: every rank\nmust reach the barrier\
+    \ before any rank proceeds. This serializes ranks and\nprevents compute-communication\
+    \ overlap when ranks have unequal workloads.\n\nThe barrier-free alternative is\
+    \ the **signal-shadow pattern**:\n  1. gin.increaseSignalShadow(signalIndex, expectedIncoming)\n\
+    \     \u2014 declare how many incoming signals this rank expects (typically nranks-1).\n\
+    \     Call this BEFORE issuing puts (thread 0, then __syncthreads).\n  2. Each\
+    \ gin.put(..., ncclGin_SignalInc{signalIndex}, ...) increments the\n     RECEIVER's\
+    \ signal counter when the transfer completes.\n  3. gin.waitSignalMeetShadow(ncclCoopThread{},\
+    \ signalIndex)\n     \u2014 blocks until received signal count meets the shadow\
+    \ value.\n  4. gin.flush(ncclCoopThread{}) \u2014 ensures all outgoing puts complete.\n\
+    \nWith this pattern each rank issues puts immediately after its local work\nfinishes,\
+    \ without waiting for other ranks. Faster ranks proceed without\nstalling on slower\
+    \ ones. This is the preferred pattern for overlapping\ncompute with communication.\n\
+    \n## Why GIN Enables Overlap\n\nGIN puts offload data movement to the NIC's DMA\
+    \ engine. The NIC operates\nINDEPENDENTLY of GPU SMs. A GIN put kernel uses ~1\
+    \ SM briefly to initiate\nthe transfer, then the NIC handles data movement while\
+    \ all other SMs compute.\n\nGIN wait kernels poll the NIC signal register. Use\
+    \ minimal threads\n(1 warp = 32 threads in 1 block) to minimize SM occupation\
+    \ while polling.\n\n\n## Hardware Context\n\nThis program is compiled and executed\
+    \ on the following hardware. Use this\ninformation to guide kernel design decisions\
+    \ (block counts, overlap strategy,\nbackend selection, resource budgeting).\n\n\
+    ### GPU Architecture\n- **GPU**: NVIDIA A100 (Ampere)\n- **Architecture**: sm_80\n\
+    - **SMs**: 108 streaming multiprocessors\n- **HBM bandwidth**: ~2 TB/s\n- **L2\
+    \ cache**: 40 MB\n- **Shared memory per SM**: 164 KB (configurable)\n- **Max threads\
+    \ per SM**: 2048\n- **Max threads per block**: 1024\n- **Warp size**: 32\n\n###\
+    \ Topology & Interconnect\n- **Ranks**: 2 (one GPU per node, mapped by node)\n\
+    - **Topology**: Inter-node (separate machines)\n- **Network**: InfiniBand (Mellanox\
+    \ ConnectX (mlx5))\n- **Peer connectivity**: Ranks are NOT NVLink-connected (different\
+    \ nodes).\n  LSA (load/store access) is unavailable across nodes. GIN (GPU-Initiated\n\
+    \  Networking) is the correct backend for this topology.\n\n### Build Environment\n\
+    - **CUDA**: 13.1\n- **NCCL**: 2.28.9 (device API with GIN/LSA support)\n- **Compilation**:\
+    \ nvcc -rdc=true -arch=sm_80 (relocatable device code)\n- **MPI**: OpenMPI (mpirun\
+    \ with hostfile, 2 processes)\n\n### Resource Budgeting Implications\n- With 108\
+    \ SMs, a communication kernel using 1 block (1 SM) leaves 107 SMs\n  for compute\
+    \ \u2014 negligible overhead.\n- GIN puts offload to NIC DMA (zero SM cost after\
+    \ initiation). This means\n  GIN communication and GPU compute can run truly in\
+    \ parallel without\n  contending for SMs or HBM bandwidth.\n- For split put/wait:\
+    \ the PUT kernel occupies 1 SM briefly to initiate\n  transfers, then returns.\
+    \ The WAIT kernel polls NIC signals on 1 SM.\n  Both are lightweight.\n\n\n##\
+    \ Performance Feedback\n\nAfter each run, you receive:\n- Wall-clock time (Time:\
+    \ X.XXXX ms) \u2014 the primary metric to minimize.\n- Comparison to the best\
+    \ score achieved so far.\n- Architecture classification: your program is classified\
+    \ as **fused**\n  (compute+comm in one kernel), **overlap** (multi-stream), or\
+    \ **sequential**.\n- Factual code metrics: kernel count and names, stream count,\
+    \ sync pattern\n  counts, GIN/LSA configuration values, warmup presence, memory\
+    \ patterns.\n\nKey principles:\n- With compute-communication overlap, total time\
+    \ \u2248 max(compute_path, comm_path),\n  NOT compute + comm. Overlap \"hides\"\
+    \ whichever path is shorter.\n- Focus on reducing the CRITICAL PATH \u2014 the\
+    \ longest chain of sequential\n  dependencies. Improving a kernel that runs concurrently\
+    \ on another stream\n  or another hardware unit does not reduce wall-clock time.\n\
+    - Measure before optimizing: if communication is already hidden, further\n  reducing\
+    \ communication time has no benefit. Optimize the bottleneck.\n\n\n---\n\n## NCCL\
+    \ GIN API Reference\n\n## NCCL Device API Overview\n\nHost-side setup is complete.\
+    \ Focus on device-kernel usage only.\n\n**Core Concepts:**\n- **LSA (Load/Store\
+    \ Accessible)**: Direct memory access to local GPU peers\n- **GIN (GPU-Initiated\
+    \ Networking)**: One-sided network transfers to remote GPUs\n- **Teams**: Subsets\
+    \ of ranks - World (all), LSA (local), Rail (network)\n- **Thread Groups**: Block\
+    \ (`ncclCoopCta`), Warp (`ncclCoopWarp`), Thread (`ncclCoopThread`)\n\n**Key Principles:**\n\
+    - Only use device APIs inside kernels (no host-side calls)\n- Synchronize appropriately\
+    \ between writes and reads\n\n\n## NCCL GIN (GPU-Initiated Networking) API Documentation\n\
+    \n### Overview\nThe GIN API enables device-initiated, one-sided network communication\
+    \ with remote peers.\nGIN is supported since NCCL 2.28.7. All operations are device-side\
+    \ only.\n\n### Core Components\n\n#### ncclGin Class\n**Purpose**: Manages device-initiated\
+    \ one-sided network transfers to remote peers.\n\n**Constructor**:\n```cpp\nncclGin(ncclDevComm\
+    \ const &comm, int contextIndex)\n```\n\n**Parameters**:\n- `comm`: Device communicator\
+    \ created via `ncclDevCommCreate()`\n- `contextIndex`: Network communication channel\
+    \ identifier. Multiple contexts allow spreading traffic across connections to\
+    \ avoid bottlenecks.\n\n### Data Transfer Operations\n\n#### put\nExecutes a device-initiated,\
+    \ one-sided data transfer from local buffer to remote buffer on a peer.\n\n**Signature**:\n\
+    ```cpp\nvoid put(ncclTeam team, int peer,\n         ncclWindow_t dstWnd, size_t\
+    \ dstOffset,\n         ncclWindow_t srcWnd, size_t srcOffset,\n         size_t\
+    \ bytes,\n         RemoteAction remoteAction = ncclGin_None{},\n         LocalAction\
+    \ localAction = ncclGin_None{},\n         Coop coop = ncclCoopThread{},\n    \
+    \     DescriptorSmem descriptor = ncclGin_None{},\n         cuda::thread_scope\
+    \ alreadyReleased = cuda::thread_scope_thread,\n         cuda::thread_scope expected_scope\
+    \ = cuda::thread_scope_device)\n```\n\n**Key Parameters**:\n- `team`: Team handle\
+    \ (e.g., from `ncclTeamWorld()`)\n- `peer`: Target peer rank within the team\n\
+    - `dstWnd`, `dstOffset`: Destination window and offset\n- `srcWnd`, `srcOffset`:\
+    \ Source window and offset\n- `bytes`: Number of bytes to transfer\n- `remoteAction`:\
+    \ Optional signal increment on remote peer (e.g., `ncclGin_SignalInc{signalIndex}`)\n\
+    - `localAction`: Optional counter increment on local peer (e.g., `ncclGin_CounterInc{counterIndex}`)\n\
+    \n**Ordering Guarantee**: Visibility of attached signals implies visibility of\
+    \ the put data and all preceding puts to the same peer (when using the same GIN\
+    \ context).\n\n#### flush\nEnsures pending transfers are locally consumed, meaning\
+    \ their source buffers are safe to reuse.\n\n**Signature**:\n```cpp\nvoid flush(Coop\
+    \ coop, cuda::memory_order ord = cuda::memory_order_acquire)\n```\n\n### Signals\
+    \ (Remote Actions)\n\nSignals are 64-bit integer values manipulated atomically,\
+    \ used for remote notification.\nThe signal index type is a 32-bit identifier;\
+    \ the signal *value* read/written is 64-bit.\n\n#### Signal Types\n- `ncclGinSignal_t`:\
+    \ 32-bit signal index (`uint32_t`); the signal value is `uint64_t`\n- `ncclGin_SignalInc`:\
+    \ Increment signal by 1 on remote peer\n- `ncclGin_SignalAdd`: Add specific value\
+    \ to signal on remote peer\n\n#### Signal Methods\n\n**readSignal**: Read current\
+    \ signal value\n```cpp\nuint64_t readSignal(ncclGinSignal_t signal, int bits =\
+    \ 64,\n                    cuda::memory_order ord = cuda::memory_order_acquire)\n\
+    ```\n\n**waitSignal**: Wait until signal reaches at least the specified value\n\
+    ```cpp\nvoid waitSignal(Coop coop, ncclGinSignal_t signal, uint64_t least,\n \
+    \               int bits = 64, cuda::memory_order ord = cuda::memory_order_acquire)\n\
+    ```\n\n**resetSignal**: Reset signal to zero\n```cpp\nvoid resetSignal(ncclGinSignal_t\
+    \ signal)\n```\n\n**signal**: Send standalone signal without data transfer\n```cpp\n\
+    void signal(ncclTeam team, int peer, RemoteAction remoteAction,\n            Coop\
+    \ coop = ncclCoopThread{},\n            DescriptorSmem descriptor = ncclGin_None{},\n\
+    \            cuda::thread_scope alreadyReleased = cuda::thread_scope_thread,\n\
+    \            cuda::thread_scope expected_scope = cuda::thread_scope_device)\n\
+    ```\n\n**Rolling Comparison**: Signal comparisons use rolling logic to handle\
+    \ unsigned overflow.\n\n### Counters (Local Actions)\n\nCounters track local completion\
+    \ of operations, limited to 56-bit values.\n\n#### Counter Types\n- `ncclGinCounter_t`:\
+    \ 32-bit counter index (`uint32_t`); counter values are `uint64_t` (max 56 bits\
+    \ usable)\n- `ncclGin_CounterInc`: Increment counter locally on source peer\n\n\
+    #### Counter Methods\n\n**readCounter**: Read current counter value\n```cpp\n\
+    uint64_t readCounter(ncclGinCounter_t counter, int bits = 56,\n              \
+    \       cuda::memory_order ord = cuda::memory_order_acquire)\n```\n\n**waitCounter**:\
+    \ Wait until counter reaches at least the specified value\n```cpp\nvoid waitCounter(Coop\
+    \ coop, ncclGinCounter_t counter, uint64_t least,\n                 int bits =\
+    \ 56, cuda::memory_order ord = cuda::memory_order_acquire)\n```\n\n**resetCounter**:\
+    \ Reset counter to zero\n```cpp\nvoid resetCounter(ncclGinCounter_t counter)\n\
+    ```\n\n### GIN Barriers\n\n#### ncclGinBarrierSession\n**Purpose**: Network barrier\
+    \ synchronization across GIN-accessible peers.\n\n**Constructors**:\n```cpp\n\
+    // Rail-scoped barrier\nncclGinBarrierSession(Coop coop, ncclGin gin, ncclTeamTagRail\
+    \ tag, uint32_t index)\n\n// General-purpose barrier\nncclGinBarrierSession(Coop\
+    \ coop, ncclGin gin, ncclTeam team,\n                      ncclGinBarrierHandle\
+    \ handle, uint32_t index)\n```\n\n**sync Method**:\n```cpp\nvoid sync(Coop coop,\
+    \ cuda::memory_order order, ncclGinFenceLevel fence)\n```\n\n**Parameters**:\n\
+    - `order`: Memory ordering (`cuda::memory_order_relaxed`, `cuda::memory_order_release`,\
+    \ etc.)\n- `fence`: Fence level for GIN operations\n  - `ncclGinFenceLevel::Relaxed`:\
+    \ The only fence level in NCCL 2.28.9\n\n### Usage Patterns\n\n#### Basic GIN\
+    \ Put with Signal\n```cpp\nncclTeam world = ncclTeamWorld(devComm);\nncclGin gin\
+    \ { devComm, 0 };  // context 0\n\n// Read initial signal value\nuint64_t signalValue\
+    \ = gin.readSignal(signalIndex);\n\n// Issue puts to remote peers with signal\
+    \ increment\nfor (int r = 0; r < world.nRanks; ++r) {\n    if (r != world.rank)\
+    \ {\n        gin.put(world, r,\n                recvwin, recvOffset + world.rank\
+    \ * bytes,\n                sendwin, sendOffset + r * bytes,\n               \
+    \ bytes,\n                ncclGin_SignalInc{signalIndex});\n    }\n}\n\n// Wait\
+    \ for all remote peers to complete their puts\ngin.waitSignal(ncclCoopCta(), signalIndex,\
+    \ signalValue + numRemotePeers);\n\n// Flush to ensure source buffers can be reused\n\
+    gin.flush(ncclCoopCta());\n```\n\n#### GIN Barrier Pattern (World team \u2014\
+    \ general constructor)\n```cpp\n// World-team barrier requires the general constructor\
+    \ (ncclTeam + ncclGinBarrierHandle).\n// There is NO convenience constructor for\
+    \ ncclTeamTagWorld; only ncclTeamTagRail has one.\nncclGinBarrierSession<ncclCoopCta>\
+    \ bar {\n    ncclCoopCta(),\n    gin,                          // ncclGin instance\
+    \ (2nd arg)\n    ncclTeamWorld(devComm),       // ncclTeam (3rd arg)\n    devComm.railGinBarrier,\
+    \       // ncclGinBarrierHandle (4th arg)\n    blockIdx.x                    //\
+    \ barrier index (5th arg)\n};\n\n// Initial barrier with relaxed ordering\nbar.sync(ncclCoopCta(),\
+    \ cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);\n\n// Perform GIN operations...\n\
+    \n// Final barrier with release semantics\nbar.sync(ncclCoopCta(), cuda::memory_order_release,\
+    \ ncclGinFenceLevel::Relaxed);\n```\n\n#### GIN Barrier Pattern (Rail team \u2014\
+    \ convenience constructor)\n```cpp\nncclGinBarrierSession<ncclCoopCta> bar {\n\
+    \    ncclCoopCta(),\n    gin,                          // ncclGin instance\n \
+    \   ncclTeamTagRail{},            // convenience tag\n    blockIdx.x         \
+    \           // barrier index\n};\nbar.sync(ncclCoopCta(), cuda::memory_order_relaxed,\
+    \ ncclGinFenceLevel::Relaxed);\n```\n\n### Setup Requirements (Host-Side)\n\n\
+    Enable GIN support during communicator creation:\n```cpp\nncclDevCommRequirements\
+    \ reqs;\nmemset(&reqs, 0, sizeof(reqs));\nreqs.railGinBarrierCount = /* number\
+    \ needed */;\nreqs.ginSignalCount = /* number needed */;\nreqs.ginCounterCount\
+    \ = /* number needed */;\nncclDevCommCreate(comm, &reqs, &devComm);\n(void)cudaGetLastError();\
+    \  // MUST clear stale CUDA error left by ncclDevCommCreate\n```\n\nGIN is available\
+    \ when the NCCL communicator connects ranks over InfiniBand/RoCE.\nFor intra-node\
+    \ PCIe A100 GPUs, GIN uses GDAKI (GPU Direct Async Kernel-Initiated).\n\n\n##\
+    \ NCCL Pure GIN Code Examples (from official AlltoAll GIN example)\n\nThese patterns\
+    \ are taken from the NVIDIA NCCL repo `examples/06_device_api/02_alltoall_gin`.\n\
+    Use them when evolving GIN kernels for network-based, device-initiated communication.\n\
+    \n### Host-side: Device communicator creation (GIN only)\n\nCTA count must match\
+    \ railGinBarrierCount for proper barrier synchronization.\n\n```cpp\n#define NCCL_DEVICE_CTA_COUNT\
+    \ 1\n#define NCCL_DEVICE_THREADS_PER_CTA 512\n\nncclDevComm devComm;\nncclDevCommRequirements\
+    \ reqs;\nmemset(&reqs, 0, sizeof(reqs));\nreqs.railGinBarrierCount = NCCL_DEVICE_CTA_COUNT;\
+    \  // GIN barriers for network sync\nreqs.ginSignalCount = 1;                \
+    \            // GIN signals for completion\nNCCLCHECK(ncclDevCommCreate(comm,\
+    \ &reqs, &devComm));\n(void)cudaGetLastError();  // MUST clear stale CUDA error\
+    \ left by ncclDevCommCreate\n```\n\n### Host-side: Symmetric memory and window\
+    \ registration\n\nDevice API requires symmetric memory; use ncclMemAlloc and NCCL_WIN_COLL_SYMMETRIC.\n\
+    \n```cpp\nvoid* d_sendbuff;\nvoid* d_recvbuff;\nncclWindow_t send_win;\nncclWindow_t\
+    \ recv_win;\n\nNCCLCHECK(ncclMemAlloc(&d_sendbuff, size_bytes));\nNCCLCHECK(ncclMemAlloc(&d_recvbuff,\
+    \ size_bytes));\n\nNCCLCHECK(ncclCommWindowRegister(comm, d_sendbuff, size_bytes,\
+    \ &send_win, NCCL_WIN_COLL_SYMMETRIC));\nNCCLCHECK(ncclCommWindowRegister(comm,\
+    \ d_recvbuff, size_bytes, &recv_win, NCCL_WIN_COLL_SYMMETRIC));\n```\n\n### Device-side:\
+    \ GIN barrier (coordinate across ranks over network)\n\nGIN barriers enable cross-node\
+    \ synchronization from device code. Each block uses blockIdx.x\nas its barrier\
+    \ index so blocks can progress independently while coordinating with other nodes.\n\
+    \n```cpp\nncclGin gin { devComm, 0 };\nncclGinBarrierSession<ncclCoopCta> bar\
+    \ {\n    ncclCoopCta(),\n    gin,\n    ncclTeamWorld(devComm),\n    devComm.railGinBarrier,\n\
+    \    blockIdx.x\n};\nbar.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);\n\
+    ```\n\n### Device-side: readSignal before puts, waitSignal after (rolling value)\n\
+    \nRead initial signal value, issue puts that increment the remote signal, then\
+    \ wait until\nsignal reaches initialValue + number of expected increments.\n\n\
+    ```cpp\nunsigned int signalIndex = 0;\nuint64_t signalValue = gin.readSignal(signalIndex);\n\
+    \n// Issue puts (each put can use ncclGin_SignalInc{signalIndex})\nfor (int r\
+    \ = tid; r < devComm.nRanks; r += nthreads) {\n    gin.put(ncclTeamWorld(devComm),\
+    \ r,\n            recvwin, recvoffset + devComm.rank * size,\n            sendwin,\
+    \ sendoffset + r * size,\n            size, ncclGin_SignalInc{signalIndex});\n\
+    }\n\n// Wait for all remote puts to complete (rolling comparison handles overflow)\n\
+    gin.waitSignal(ncclCoopCta(), signalIndex, signalValue + devComm.nRanks);\ngin.flush(ncclCoopCta());\n\
+    ```\n\n### Device-side: Full pure GIN kernel sketch (AlltoAll-style)\n\n```cpp\n\
+    template <typename T>\n__global__ void PureGinAlltoAllKernel(ncclWindow_t sendwin,\
+    \ size_t sendoffset,\n                                      ncclWindow_t recvwin,\
+    \ size_t recvoffset,\n                                      size_t count, ncclDevComm\
+    \ devComm) {\n    int ginContext = 0;\n    unsigned int signalIndex = 0;\n   \
+    \ ncclGin gin { devComm, ginContext };\n    uint64_t signalValue = gin.readSignal(signalIndex);\n\
+    \n    ncclGinBarrierSession<ncclCoopCta> bar {\n        ncclCoopCta(), gin, ncclTeamWorld(devComm),\n\
+    \        devComm.railGinBarrier, blockIdx.x\n    };\n    bar.sync(ncclCoopCta(),\
+    \ cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);\n\n    int tid = threadIdx.x\
+    \ + blockIdx.x * blockDim.x;\n    int nthreads = blockDim.x * gridDim.x;\n   \
+    \ const size_t size = count * sizeof(T);\n\n    for (int r = tid; r < devComm.nRanks;\
+    \ r += nthreads) {\n        gin.put(ncclTeamWorld(devComm), r,\n             \
+    \   recvwin, recvoffset + devComm.rank * size,\n                sendwin, sendoffset\
+    \ + r * size,\n                size, ncclGin_SignalInc{signalIndex});\n    }\n\
+    \n    gin.waitSignal(ncclCoopCta(), signalIndex, signalValue + devComm.nRanks);\n\
+    \    gin.flush(ncclCoopCta());\n}\n```\n\n### When to use pure GIN (from official\
+    \ README)\n\n- Communication between ranks that cannot use LSA (e.g. different\
+    \ nodes)\n- Network-based collectives in multi-node environments\n- All communication\
+    \ must go through the network\n\n### Performance notes (from official README)\n\
+    \n- Signal-based completion enables asynchronous operation patterns\n- Multiple\
+    \ GIN contexts can improve parallel communication performance\n- CTA count must\
+    \ match railGinBarrierCount for proper barrier synchronization\n\n\n## NCCL Thread\
+    \ Groups (Cooperative Groups)\n\n### Overview\nThread groups specify which threads\
+    \ within a CTA participate in NCCL operations.\nMany device API functions take\
+    \ a cooperative group parameter.\n\n### Predefined Thread Groups\n\n**ncclCoopThread()**\
+    \ - Single thread participation\n**ncclCoopWarp()** - Warp-level (32 threads)\n\
+    **ncclCoopCta()** - Block-level (all threads) - **Most commonly used**\n\n###\
+    \ Usage Patterns\n\n#### Full CTA Synchronization (Most Common)\n```cpp\n// Create\
+    \ barrier with ncclCoopCta\nncclLsaBarrierSession<ncclCoopCta> lsaBar {\n    ncclCoopCta(),\
+    \ devComm, ncclTeamLsa(devComm),\n    devComm.lsaBarrier, blockIdx.x\n};\n\n//\
+    \ All threads synchronize\nlsaBar.sync(ncclCoopCta(), cuda::memory_order_release);\n\
+    gin.flush(ncclCoopCta());\n```\n\n#### Leader Thread Pattern\n```cpp\n// Only\
+    \ thread 0 issues operation\nif (threadIdx.x == 0) {\n    gin.put(world, peer,\
+    \ dstWnd, dstOffset, srcWnd, srcOffset, bytes,\n            ncclGin_SignalInc{signalIndex},\
+    \ {}, ncclCoopThread());\n}\n// All threads wait\ngin.waitSignal(ncclCoopCta(),\
+    \ signalIndex, expectedValue);\n```\n\n#### Warp-Level Operations\n```cpp\n//\
+    \ All 32 threads in each warp must participate when using ncclCoopWarp.\n// Do\
+    \ NOT guard with `if (threadIdx.x % 32 == 0)` \u2014 that would leave\n// only\
+    \ lane 0, which contradicts the warp cooperative group contract.\nint warpId =\
+    \ threadIdx.x / 32;\ngin.put(world, peer + warpId, dstWnd, dstOffset,\n      \
+    \  srcWnd, srcOffset, bytes,\n        ncclGin_SignalInc{signalIndex}, ncclGin_None{},\
+    \ ncclCoopWarp());\n```\n\n### Custom Thread Groups\n\nImplement custom groups\
+    \ by providing three methods:\n- `thread_rank()`: Thread identifier within group\n\
+    - `size()`: Total threads in group\n- `sync()`: Synchronization mechanism\n\n\
+    NCCL is also compatible with CUDA cooperative groups (`cooperative_groups::thread_block`,\
+    \ etc.).\n\n### Guidelines\n\n- **ncclCoopCta()**: Default choice for most operations,\
+    \ full block synchronization\n- **ncclCoopWarp()**: For warp-granular operations,\
+    \ performance optimization\n- **ncclCoopThread()**: Single thread operations,\
+    \ typically with leader thread pattern\n\n\n## NCCL Teams\n\n### Overview\nTeams\
+    \ represent subsets of ranks within an NCCL communicator for scoped communication.\n\
+    \n### Predefined Teams\n\n**ncclTeamWorld(devComm)** - All ranks in the communicator\
+    \ (global scope)\n**ncclTeamLsa(devComm)** - Ranks accessible via load/store operations\
+    \ (local GPU group)\n**ncclTeamRail(devComm)** - Ranks directly accessible over\
+    \ network (rail topology)\n\n### Team Structure\n\nThe `ncclTeam` type contains:\n\
+    - `nRanks`: Number of ranks in the team\n- `rank`: Current rank position within\
+    \ the team (0-indexed)\n- `stride`: Spacing between ranks\n\n**Properties**:\n\
+    - World and LSA teams are contiguous (stride = 1)\n- Rail teams are typically\
+    \ non-contiguous (stride = LSA team size)\n\n### Usage Patterns\n\n#### Accessing\
+    \ Team Properties\n```cpp\nncclTeam world = ncclTeamWorld(devComm);\nncclTeam\
+    \ lsa = ncclTeamLsa(devComm);\nncclTeam rail = ncclTeamRail(devComm);\n\n// Use\
+    \ team properties\nfor (int r = 0; r < world.nRanks; ++r) {\n    // Communicate\
+    \ with rank r in world team\n}\n\nfor (int lp = 0; lp < lsa.nRanks; ++lp) {\n\
+    \    // Access LSA peer lp\n    float* peer = (float*)ncclGetLsaPointer(window,\
+    \ offset, lp);\n}\n```\n\n#### Team-Scoped GIN Operations\n```cpp\nncclTeam world\
+    \ = ncclTeamWorld(devComm);\n\n// Put to specific peer in world team\ngin.put(world,\
+    \ peerRank, dstWnd, dstOffset, srcWnd, srcOffset, bytes,\n        ncclGin_SignalInc{signalIndex});\n\
+    ```\n\n#### Hybrid LSA + GIN Pattern\n```cpp\nncclTeam world = ncclTeamWorld(devComm);\n\
+    ncclTeam lsa = ncclTeamLsa(devComm);\n\n// The LSA team is contiguous in world\
+    \ rank space.\n// world.rank is this GPU's world rank; lsa.rank is this GPU's\
+    \ position\n// within the LSA team. The first world rank in the LSA group is:\n\
+    int lsaWorldStart = world.rank - lsa.rank;\n\n// Iterate over world, distinguish\
+    \ LSA vs non-LSA peers\nfor (int r = 0; r < world.nRanks; ++r) {\n    if (r >=\
+    \ lsaWorldStart && r < lsaWorldStart + lsa.nRanks) {\n        // Use LSA for this\
+    \ peer (convert world rank \u2192 LSA rank)\n        int lsaPeer = r - lsaWorldStart;\n\
+    \        float* peer = (float*)ncclGetLsaPointer(recvwin, offset, lsaPeer);\n\
+    \        peer[idx] = data;\n    } else {\n        // Use GIN for remote peer\n\
+    \        gin.put(world, r, recvwin, offset, sendwin, offset, bytes,\n        \
+    \        ncclGin_SignalInc{signalIndex});\n    }\n}\n```\n\n### Guidelines\n\n\
+    - **World team**: Use for global all-to-all communication or when addressing all\
+    \ ranks\n- **LSA team**: Use for direct memory access within local GPU group\n\
+    - **Rail team**: Use for optimized network topology communication (advanced)\n\
+    \n\n---\n\n## NCCL GIN Header Files\n\n## nccl_device/gin.h \u2014 GIN Session\
+    \ API (authoritative header)\n\n```cpp\n// ncclGin (alias for ncclGin_BackendMask<NCCL_GIN_BACKEND_MASK_ALL>)\n\
+    //\n// Construct with: ncclGin gin(devComm, contextIndex);\n//   contextIndex\
+    \ is typically 0 (must be < ginContextCount in requirements).\n\n// Completion\
+    \ action types for put():\nstruct ncclGin_None {};                         //\
+    \ No remote action / no local action\nstruct ncclGin_SignalAdd { ncclGinSignal_t\
+    \ signal; uint64_t value; };\nstruct ncclGin_SignalInc { ncclGinSignal_t signal;\
+    \ };   // Equivalent to SignalAdd{+1}\n// SignalInc: for a given signal, all operations\
+    \ between successive reset()'s\n// must either all be SignalInc or all not SignalInc.\n\
+    struct ncclGin_CounterInc { ncclGinCounter_t counter; };\nstruct ncclGin_DescriptorSmem\
+    \ { ncclGinDescriptorSmem* descriptor; };\n\n// ---- put (window+offset variant)\
+    \ ----\n// Puts bytes from local srcWnd+srcOffset to peer's dstWnd+dstOffset.\n\
+    // RemoteAction: signal action on the *receiver* when put completes. Signal is\n\
+    //   visible only after this put AND all preceding puts on this context to the\n\
+    //   same peer have settled.\n// LocalAction: action locally when source buffer\
+    \ has been consumed.\n// Coop: set of threads participating (default ncclCoopThread).\n\
+    template<\n  typename RemoteAction = ncclGin_None,\n  typename LocalAction = ncclGin_None,\n\
+    \  typename Coop = ncclCoopThread,\n  typename DescriptorSmem = ncclGin_None>\n\
+    void put(\n  ncclTeam, int peer,\n  ncclWindow_t dstWnd, size_t dstOffset,\n \
+    \ ncclWindow_t srcWnd, size_t srcOffset, size_t bytes,\n  RemoteAction = ncclGin_None{},\n\
+    \  LocalAction = ncclGin_None{},\n  Coop = ncclCoopThread{},\n  DescriptorSmem\
+    \ = ncclGin_None{},\n  cuda::thread_scope alreadyReleased = cuda::thread_scope_thread,\n\
+    \  cuda::thread_scope expected_scope = cuda::thread_scope_device) const;\n\n//\
+    \ ---- put (ncclSymPtr variant) ----\ntemplate<typename T, ...same template args...>\n\
+    void put(ncclTeam, int peer,\n  ncclSymPtr<T> dstElts, ncclSymPtr<T> srcElts,\
+    \ size_t nElts, ...) const;\n\n// ---- putValue (write a scalar <= 8 bytes to\
+    \ remote) ----\ntemplate<typename T, typename RemoteAction=ncclGin_None, typename\
+    \ Coop=ncclCoopThread, ...>\nvoid putValue(ncclTeam, int peer,\n  ncclWindow_t\
+    \ dstWnd, size_t dstOffset, T value, ...) const;\n\n// ---- signal (signal without\
+    \ data) ----\ntemplate<typename RemoteAction, typename Coop=ncclCoopThread, ...>\n\
+    void signal(ncclTeam, int peer, RemoteAction, Coop = ncclCoopThread(), ...) const;\n\
+    \n// ---- flush ----\n// All source buffers from put's from any thread in this\
+    \ coop will be safe to reuse.\n// Flush does NOT guarantee that data has settled\
+    \ in remote memory.\n// IMPORTANT: The Coop must match the threads that actually\
+    \ issued the puts.\n//   e.g. if only thread (0,0) issued puts, use ncclCoopThread,\
+    \ NOT ncclCoopCta.\ntemplate<typename Coop>\nvoid flush(Coop, cuda::memory_order\
+    \ ord = cuda::memory_order_acquire) const;\n\n// ---- Signal/Counter wait ----\n\
+    // Uses \"rolling\" comparison: rolling_less_equal(supplied, internal).\n// Counters\
+    \ use max 56 bits. Signals use 64 bits by default.\n\nuint64_t readCounter(ncclGinCounter_t\
+    \ counter, int bits=56, ...) const;\n\ntemplate<typename Coop>\nvoid waitCounter(Coop,\
+    \ ncclGinCounter_t counter, uint64_t least, int bits=56, ...) const;\n\n// Signal\
+    \ shadow: user-manipulable mirror of signal value.\nuint64_t* getSignalShadowPtr(ncclGinSignal_t\
+    \ signal) const;\nvoid increaseSignalShadow(ncclGinSignal_t signal, uint64_t delta)\
+    \ const;\n\nuint64_t readSignal(ncclGinSignal_t signal, int bits=64, ...) const;\n\
+    \n// Wait for signal to meet or exceed 'least'.\ntemplate<typename Coop>\nvoid\
+    \ waitSignal(Coop, ncclGinSignal_t signal, uint64_t least, int bits=64, ...) const;\n\
+    \n// Wait for signal to meet or exceed shadow value.\ntemplate<typename Coop>\n\
+    void waitSignalMeetShadow(Coop, ncclGinSignal_t signal, int bits=64, ...) const;\n\
+    \n// Wait until signal exceeds shadow by leastDelta, updates shadow, returns before/delta.\n\
+    template<typename Coop, typename Uint>\nvoid waitSignalFollowShadow(Coop, ncclGinSignal_t\
+    \ signal, Uint leastDelta,\n  Uint* before, Uint* delta, int bits=64, ...) const;\n\
+    \n// Reset (sets to zero). May NOT race with concurrent modifications.\nvoid resetCounter(ncclGinCounter_t\
+    \ counter) const;\nvoid resetSignal(ncclGinSignal_t signal) const;\n```\n\n\n\
+    ## nccl_device/core.h \u2014 Core types, teams, windows, ncclDevComm\n\n```cpp\n\
+    // Forward declarations\nstruct ncclDevComm;\nstruct ncclTeam;\n// ncclWindow_t\
+    \ is defined in nccl.h\n\ntypedef uint32_t ncclGinSignal_t;\ntypedef uint32_t\
+    \ ncclGinCounter_t;\n\n// ---- ncclTeam ----\nstruct ncclTeam {\n  int nRanks,\
+    \ rank, stride;\n};\n\n// ---- ncclDevCommRequirements ----\n// Passed to ncclDevCommCreate\
+    \ to configure the device communicator.\nstruct ncclDevCommRequirements {\n  ncclDevResourceRequirements_t*\
+    \ resourceRequirementsList;\n  ncclTeamRequirements_t* teamRequirementsList;\n\
+    \n  bool lsaMultimem;\n\n  int barrierCount;\n  int lsaBarrierCount;\n  int railGinBarrierCount;\
+    \      // Typically 1\n\n  int lsaLLA2ABlockCount, lsaLLA2ASlotCount;\n\n  bool\
+    \ ginForceEnable;\n  int ginContextCount;          // Hint; typically 1\n  int\
+    \ ginSignalCount;           // Must be >= number of distinct signal indices used\n\
+    \  int ginCounterCount;          // Must be >= number of distinct counter indices\
+    \ used\n};\n\n// Host-side create/destroy:\nncclResult_t ncclDevCommCreate(ncclComm_t,\
+    \ ncclDevCommRequirements_t const*, ncclDevComm_t* outDevComm);\nncclResult_t\
+    \ ncclDevCommDestroy(ncclComm_t, ncclDevComm_t const* devComm);\n\n// ---- Team\
+    \ API ----\nncclTeam ncclTeamWorld(ncclDevComm const&);   // All ranks\nncclTeam\
+    \ ncclTeamLsa(ncclDevComm const&);     // Local (NVLink) ranks\nncclTeam ncclTeamRail(ncclDevComm\
+    \ const&);    // Network rail ranks\n\nint ncclTeamRankToWorld(ncclDevComm const&,\
+    \ ncclTeam, int rank);\nint ncclTeamRankToLsa(ncclDevComm const&, ncclTeam, int\
+    \ rank);\nbool ncclTeamRankIsMember(ncclTeam_t a, ncclTeam_t b, int bPeer);\n\
+    int ncclTeamRankToTeam(ncclTeam_t a, ncclTeam_t b, int bPeer);\nint ncclTeamRankInDifference(ncclTeam_t\
+    \ parent, ncclTeam_t subset, int index);\nncclTeam_t ncclTeamInnerFactor(ncclTeam_t\
+    \ parent, int innerSize);\nncclTeam_t ncclTeamOuterFactor(ncclTeam_t parent, int\
+    \ innerSize);\n\n// ---- Window API ----\n// Get local pointer into a registered\
+    \ window at byte offset:\nvoid* ncclGetLocalPointer(ncclWindow_t w, size_t offset);\n\
+    // Get peer's pointer (requires LSA connectivity):\nvoid* ncclGetPeerPointer(ncclWindow_t\
+    \ w, size_t offset, int peer);\nvoid* ncclGetPeerPointer(ncclWindow_t w, size_t\
+    \ offset, ncclTeam tm, int peer);\n// LSA peer pointer:\nvoid* ncclGetLsaPointer(ncclWindow_t\
+    \ w, size_t offset, int peer);\n```\n\n\n## nccl_device/coop.h \u2014 Cooperative\
+    \ group types\n\n```cpp\n// NCCL cooperative group types (used as Coop template\
+    \ parameters for GIN calls).\n// Each type provides: thread_rank(), size(), num_threads(),\
+    \ sync().\n\n// ncclCoopThread \u2014 single thread (default for put/waitSignal)\n\
+    typedef ncclCoopTile<1> ncclCoopThread;\n\n// ncclCoopWarp \u2014 full 32-thread\
+    \ warp\ntypedef ncclCoopTile<32> ncclCoopWarp;\n\n// ncclCoopCta \u2014 entire\
+    \ CTA (threadblock)\nstruct ncclCoopCta {\n  int thread_rank() const { return\
+    \ threadIdx.x; }\n  int size() const { return blockDim.x; }\n  void sync() { __syncthreads();\
+    \ }\n};\n\n// ncclCoopTile<N> \u2014 aligned power-of-2 set of threads within\
+    \ a warp (N <= 32)\ntemplate<int nThreadsPow2>\nstruct ncclCoopTile {\n  int thread_rank()\
+    \ const;  // lane % nThreadsPow2\n  int size() const;         // nThreadsPow2\n\
+    \  void sync();              // __syncwarp(laneMask)\n};\n\n// ncclCoopLanes \u2014\
+    \ arbitrary subset of lanes in a warp\nstruct ncclCoopLanes {\n  uint32_t lmask;\n\
+    \  int thread_rank() const;  // popcount of lower lanes\n  int size() const; \
+    \        // popcount(lmask)\n  void sync();              // __syncwarp(lmask)\n\
+    };\n\n// ncclCoopWarpSpan \u2014 consecutive warps with unique id [0..15]\nstruct\
+    \ ncclCoopWarpSpan {\n  uint32_t warp0:8, nWarps:8, id:8;\n  int thread_rank()\
+    \ const;  // threadIdx.x - 32*warp0\n  int size() const;         // 32*nWarps\n\
+    \  void sync();              // __barrier_sync_count(1+id, 32*nWarps)\n};\n\n\
+    // Helper: get active/coalesced lanes\nncclCoopLanes ncclCoopCoalesced();  //\
+    \ __activemask()\n\n// IMPORTANT usage notes:\n// - flush(Coop): Coop must match\
+    \ the threads that issued puts.\n//   If only one thread issued puts, use ncclCoopThread,\
+    \ NOT ncclCoopCta.\n// - waitSignal(Coop, ...): ncclCoopThread is safest; ncclCoopCta\
+    \ can deadlock\n//   if not all CTA threads reach the wait.\n```\n\n\n## nccl_device/ptr.h\
+    \ \u2014 Symmetric pointer type\n\n```cpp\n// ncclSymPtr<T>: a window + byte offset\
+    \ pair for type-safe symmetric addressing.\n// Can be used with the ncclSymPtr\
+    \ variant of gin.put().\ntemplate<typename T>\nstruct ncclSymPtr {\n  ncclWindow_t\
+    \ window;\n  size_t offset;\n\n  ncclSymPtr(ncclWindow_t window = nullptr, size_t\
+    \ offset = 0);\n\n  // Arithmetic\n  ncclSymPtr<T>& operator+=(int/unsigned/long/...);\n\
+    \  ncclSymPtr<T>& operator-=(int/unsigned/long/...);\n\n  // Device-side pointer\
+    \ resolution\n  T* localPtr() const;          // Local pointer\n  T* lsaPtr(int\
+    \ peer) const;    // LSA peer pointer\n  T* peerPtr(int peer) const;   // Peer\
+    \ pointer\n  T* peerPtr(ncclTeam team, int peer) const;\n  T* multimemPtr(ncclMultimemHandle\
+    \ mmHandle) const;\n  T* lsaMultimemPtr(ncclDevComm const&) const;\n};\n```\n\n\
+    \n## nccl_device/gin_barrier.h \u2014 GIN barrier API\n\n```cpp\n// GIN fence\
+    \ levels\nenum class ncclGinFenceLevel {\n  Relaxed\n};\n\n// Host-side: create\
+    \ barrier requirement\nncclResult_t ncclGinBarrierCreateRequirement(\n  ncclComm_t,\
+    \ ncclTeam_t, int nBarriers,\n  ncclGinBarrierHandle_t* outHandle,\n  ncclDevResourceRequirements_t*\
+    \ outReq);\n\n// Device-side barrier session\ntemplate<typename Coop>\nstruct\
+    \ ncclGinBarrierSession {\n  // Constructors\n  ncclGinBarrierSession(Coop, ncclGin,\
+    \ ncclTeam, ncclGinBarrierHandle, uint32_t index);\n  ncclGinBarrierSession(Coop,\
+    \ ncclGin, ncclTeamTagRail, uint32_t index);\n\n  // Not copyable\n  ncclGinBarrierSession(ncclGinBarrierSession\
+    \ const&) = delete;\n\n  // Synchronize all team members\n  void sync(Coop, cuda::memory_order,\
+    \ ncclGinFenceLevel);\n};\n```\n"
+  task_sys_msg_per_island: null
+  use_text_feedback: true
+job_config:
+  conda_env: null
+  eval_program_path: evaluate.py
+  extra_cmd_args: {}
+  time: null
+results_directory: results_ds_v3_moe
+timestamp: '2026-02-27T21:56:54.451766'

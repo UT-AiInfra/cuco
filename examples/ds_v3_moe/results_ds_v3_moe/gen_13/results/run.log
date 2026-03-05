@@ -1,0 +1,32 @@
+=== Run 1 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 141.7677 ms
+Verification: PASS (max error: 0.001410)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 141.7748 ms
+
+
+
+=== Run 2 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 141.8179 ms
+Verification: PASS (max error: 0.001410)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 141.8230 ms
+
+
+

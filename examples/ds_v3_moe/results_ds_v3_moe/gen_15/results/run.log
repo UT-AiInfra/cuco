@@ -1,0 +1,33 @@
+=== Run 1 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 134.6867 ms
+Phase: dispatch_put = 0.0584 ms
+Phase: self_copy_dispatch = 0.1055 ms
+Phase: dispatch_wait = 1.1141 ms
+Phase: self_compute = 67.0628 ms
+Phase: combine_setup = 0.0348 ms
+Phase: remote_compute = 67.2543 ms
+Phase: self_copy_combine = 0.1167 ms
+Phase: combine_wait = 0.1229 ms
+Verification: FAIL (max error: 0.731059)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 45.2024 ms
+Phase: dispatch_put = 0.0717 ms
+Phase: self_copy_dispatch = 0.0502 ms
+Phase: dispatch_wait = 1.9139 ms
+Phase: self_compute = 22.4737 ms
+Phase: combine_setup = 0.0348 ms
+Phase: remote_compute = 22.4707 ms
+Phase: self_copy_combine = 0.0440 ms
+Phase: combine_wait = 0.0502 ms
+
+Rank 1: MISMATCH src=0 idx=0: got 0.000000 expected 0.731059 (err=0.731059)
+
+

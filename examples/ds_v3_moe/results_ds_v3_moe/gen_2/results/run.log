@@ -1,0 +1,64 @@
+=== Run 1 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+Phase: dispatch_put = 0.0666 ms
+Phase: self_copy_dispatch = 0.1096 ms
+Phase: self_compute = 22.4891 ms
+Phase: dispatch_wait = 22.5505 ms
+Phase: remote_compute = 22.4788 ms
+Phase: self_copy_combine = 0.0420 ms
+Phase: combine_put = 0.1137 ms
+Phase: combine_wait = 2.4648 ms
+Phase: dispatch_put = 0.0686 ms
+Phase: self_copy_dispatch = 0.1782 ms
+Phase: self_compute = 67.0454 ms
+Phase: dispatch_wait = 67.1734 ms
+Phase: remote_compute = 67.2829 ms
+Phase: self_copy_combine = 0.1157 ms
+Phase: combine_put = 0.0901 ms
+Phase: combine_wait = 7.2120 ms
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 141.9581 ms
+Verification: PASS (max error: 0.001410)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 47.7327 ms
+
+
+
+=== Run 2 ===
+DeepSeek-V3 MoE SPARSE Config (GIN sequential):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  ranks=2, hidden=7168, intermediate=2048
+  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]
+Phase: dispatch_put = 0.0963 ms
+Phase: self_copy_dispatch = 0.1413 ms
+Phase: self_compute = 22.4850 ms
+Phase: dispatch_wait = 22.5475 ms
+Phase: remote_compute = 22.4788 ms
+Phase: self_copy_combine = 0.0430 ms
+Phase: combine_put = 0.0645 ms
+Phase: combine_wait = 2.4115 ms
+Phase: dispatch_put = 0.0522 ms
+Phase: self_copy_dispatch = 0.1526 ms
+Phase: self_compute = 67.0536 ms
+Phase: dispatch_wait = 67.1734 ms
+Phase: remote_compute = 67.1109 ms
+Phase: self_copy_combine = 0.1147 ms
+Phase: combine_put = 0.0840 ms
+Phase: combine_wait = 7.2172 ms
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 141.7667 ms
+Verification: PASS (max error: 0.001410)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 47.6611 ms
+
+
+

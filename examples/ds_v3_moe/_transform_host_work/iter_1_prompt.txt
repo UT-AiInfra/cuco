@@ -1,0 +1,1417 @@
+## Original CUDA Source Code
+
+```cuda
+#include <cuda_runtime.h>
+#include <nccl.h>
+#include <mpi.h>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+#include <cstdint>
+#include <cmath>
+
+// =========================================================================
+// DeepSeek-V3 MoE — Host ncclAlltoAll — SPARSE ROUTING (padded)
+//
+// Mild 3x imbalance: each rank sends {3072, 1024} tokens to {expert0, expert1}.
+// Host uses padded ncclAlltoAll with max_chunk = 3072 tokens.
+// Expert compute uses actual token counts (variable per chunk).
+// Timed breakdown included.
+// =========================================================================
+
+#define HIDDEN_DIM        7168
+#define INTERMEDIATE_DIM  2048
+#define GEMM1_OUT_DIM     (INTERMEDIATE_DIM * 2)
+#define BLOCK_SIZE        128
+#define NUM_HIDDEN_BLOCKS (HIDDEN_DIM / BLOCK_SIZE)
+#define TILE              32
+
+#define CUDA_CHECK(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+#define NCCL_CHECK(call) do { \
+    ncclResult_t res = call; \
+    if (res != ncclSuccess) { \
+        fprintf(stderr, "NCCL error at %s:%d: %s\n", __FILE__, __LINE__, ncclGetErrorString(res)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+// EVOLVE-BLOCK-START
+
+__global__ void quantizeBlockScale(
+    const float* __restrict__ in, int8_t* __restrict__ out,
+    const float* __restrict__ scales, int num_tokens, int hidden_dim)
+{
+    int h = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = blockIdx.y * blockDim.y + threadIdx.y;
+    if (t >= num_tokens || h >= hidden_dim) return;
+    int block_idx = h / BLOCK_SIZE;
+    float scale = scales[block_idx * num_tokens + t];
+    float val = in[t * hidden_dim + h] / scale;
+    val = fminf(fmaxf(val, -127.0f), 127.0f);
+    out[t * hidden_dim + h] = static_cast<int8_t>(rintf(val));
+}
+
+__global__ void dequantizeBlockScale(
+    const int8_t* __restrict__ in, float* __restrict__ out,
+    const float* __restrict__ scales, int num_tokens, int hidden_dim)
+{
+    int h = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = blockIdx.y * blockDim.y + threadIdx.y;
+    if (t >= num_tokens || h >= hidden_dim) return;
+    int block_idx = h / BLOCK_SIZE;
+    float scale = scales[block_idx * num_tokens + t];
+    out[t * hidden_dim + h] = static_cast<float>(in[t * hidden_dim + h]) * scale;
+}
+
+__global__ void tiledMatmul(
+    const float* __restrict__ A, const float* __restrict__ B,
+    float* __restrict__ C, int M, int N, int K)
+{
+    __shared__ float As[TILE][TILE];
+    __shared__ float Bs[TILE][TILE];
+    int row = blockIdx.y * TILE + threadIdx.y;
+    int col = blockIdx.x * TILE + threadIdx.x;
+    float sum = 0.0f;
+    for (int t = 0; t < (K + TILE - 1) / TILE; t++) {
+        int aCol = t * TILE + threadIdx.x;
+        int bRow = t * TILE + threadIdx.y;
+        As[threadIdx.y][threadIdx.x] = (row < M && aCol < K) ? A[row * K + aCol] : 0.0f;
+        Bs[threadIdx.y][threadIdx.x] = (bRow < K && col < N) ? B[bRow * N + col] : 0.0f;
+        __syncthreads();
+        #pragma unroll
+        for (int k = 0; k < TILE; k++) sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+        __syncthreads();
+    }
+    if (row < M && col < N) C[row * N + col] = sum;
+}
+
+__global__ void swiGLU(
+    const float* __restrict__ in, float* __restrict__ out,
+    int num_tokens, int intermediate_dim)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int t = blockIdx.y * blockDim.y + threadIdx.y;
+    if (t >= num_tokens || i >= intermediate_dim) return;
+    int gemm1_out_dim = intermediate_dim * 2;
+    float gate = in[t * gemm1_out_dim + i];
+    float up   = in[t * gemm1_out_dim + i + intermediate_dim];
+    float silu_gate = gate / (1.0f + expf(-gate));
+    out[t * intermediate_dim + i] = silu_gate * up;
+}
+// EVOLVE-BLOCK-START
+
+void run_moe_alltoall(int rank, int nranks, ncclComm_t comm) {
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+
+    // --- Routing table: mild 3x imbalance ---
+    // send_counts[e] = how many tokens this rank sends to expert e
+    int send_counts[2] = {3072, 1024};
+    int max_chunk_tokens = 3072;
+    int total_send_tokens = send_counts[0] + send_counts[1];
+
+    // recv_counts[src] = how many tokens this expert receives from rank src
+    // Expert 0 receives {3072, 3072}, Expert 1 receives {1024, 1024}
+    int recv_counts[2];
+    for (int src = 0; src < nranks; src++)
+        recv_counts[src] = send_counts[rank];
+    int total_recv_tokens = 0;
+    for (int src = 0; src < nranks; src++) total_recv_tokens += recv_counts[src];
+
+    const size_t max_chunk_elems = (size_t)max_chunk_tokens * HIDDEN_DIM;
+    const size_t send_total_elems = (size_t)total_send_tokens * HIDDEN_DIM;
+
+    // Padded AlltoAll uses max_chunk_elems per peer
+    const size_t padded_total_elems = max_chunk_elems * nranks;
+    const int    max_total_tokens = max_chunk_tokens * nranks;
+    const int    num_scales_send = NUM_HIDDEN_BLOCKS * total_send_tokens;
+    const int    num_scales_recv = NUM_HIDDEN_BLOCKS * max_total_tokens;
+
+    const size_t w1_elems = (size_t)HIDDEN_DIM * GEMM1_OUT_DIM;
+    const size_t w2_elems = (size_t)INTERMEDIATE_DIM * HIDDEN_DIM;
+
+    if (rank == 0) {
+        printf("DeepSeek-V3 MoE SPARSE Config (Host padded AlltoAll):\n");
+        printf("  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}\n");
+        printf("  Expert 0 receives %d tokens, Expert 1 receives %d tokens\n",
+               send_counts[0] * nranks, send_counts[1] * nranks);
+        printf("  Padded chunk: %d tokens, hidden=%d, ranks=%d\n",
+               max_chunk_tokens, HIDDEN_DIM, nranks);
+        printf("  Dispatch AlltoAll: %.1f MB int8/direction (padded)\n",
+               max_chunk_elems * sizeof(int8_t) / (1024.0 * 1024.0));
+        printf("  Combine  AlltoAll: %.1f MB float32/direction (padded)\n",
+               max_chunk_elems * sizeof(float) / (1024.0 * 1024.0));
+        fflush(stdout);
+    }
+
+    // --- Buffers ---
+    float  *d_input_float, *d_deq_float, *d_expert_output, *d_final_output;
+    float  *d_scales_send, *d_scales_recv;
+    float  *d_gemm1_out, *d_swiglu_out, *d_W1, *d_W2;
+    int8_t *d_quant_send, *d_quant_recv;
+
+    CUDA_CHECK(cudaMalloc(&d_input_float,   send_total_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_quant_send,    padded_total_elems * sizeof(int8_t)));
+    CUDA_CHECK(cudaMalloc(&d_quant_recv,    padded_total_elems * sizeof(int8_t)));
+    CUDA_CHECK(cudaMalloc(&d_deq_float,     padded_total_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_expert_output, padded_total_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_final_output,  padded_total_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_scales_send,   num_scales_send * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_scales_recv,   num_scales_recv * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_gemm1_out,     (size_t)max_total_tokens * GEMM1_OUT_DIM * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_swiglu_out,    (size_t)max_total_tokens * INTERMEDIATE_DIM * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_W1,            w1_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_W2,            w2_elems * sizeof(float)));
+
+    CUDA_CHECK(cudaMemset(d_quant_send, 0, padded_total_elems * sizeof(int8_t)));
+
+    // --- Weights ---
+    std::vector<float> h_W1(w1_elems, 1.0f / (float)HIDDEN_DIM);
+    float expert_scale = (float)(rank + 1);
+    std::vector<float> h_W2(w2_elems, expert_scale / (float)INTERMEDIATE_DIM);
+    CUDA_CHECK(cudaMemcpy(d_W1, h_W1.data(), w1_elems * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_W2, h_W2.data(), w2_elems * sizeof(float), cudaMemcpyHostToDevice));
+
+    // Input: tokens for expert e get value (1 + e), packed contiguously
+    // Layout: [send_counts[0] tokens for expert0 | send_counts[1] tokens for expert1]
+    std::vector<float> h_input(send_total_elems);
+    size_t offset = 0;
+    for (int e = 0; e < nranks; e++) {
+        float value = (float)(1 + e);
+        size_t chunk = (size_t)send_counts[e] * HIDDEN_DIM;
+        for (size_t i = 0; i < chunk; i++) h_input[offset + i] = value;
+        offset += chunk;
+    }
+    CUDA_CHECK(cudaMemcpy(d_input_float, h_input.data(), send_total_elems * sizeof(float), cudaMemcpyHostToDevice));
+
+    std::vector<float> h_scales_s(num_scales_send, 1.0f);
+    CUDA_CHECK(cudaMemcpy(d_scales_send, h_scales_s.data(), num_scales_send * sizeof(float), cudaMemcpyHostToDevice));
+    std::vector<float> h_scales_r(num_scales_recv, 1.0f);
+    CUDA_CHECK(cudaMemcpy(d_scales_recv, h_scales_r.data(), num_scales_recv * sizeof(float), cudaMemcpyHostToDevice));
+
+    // --- Quantize into padded layout ---
+    // We need to quantize each expert's tokens and place them at padded offsets
+    // First quantize all tokens contiguously
+    {
+        dim3 qblk(16, 16);
+        dim3 qgrd((HIDDEN_DIM + qblk.x - 1) / qblk.x,
+                  (total_send_tokens + qblk.y - 1) / qblk.y);
+        // Temp buffer for contiguous quantized output
+        int8_t* d_quant_contig;
+        CUDA_CHECK(cudaMalloc(&d_quant_contig, send_total_elems * sizeof(int8_t)));
+        quantizeBlockScale<<<qgrd, qblk, 0, stream>>>(
+            d_input_float, d_quant_contig, d_scales_send, total_send_tokens, HIDDEN_DIM);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        // Copy into padded positions
+        CUDA_CHECK(cudaMemset(d_quant_send, 0, padded_total_elems * sizeof(int8_t)));
+        size_t src_off = 0;
+        for (int e = 0; e < nranks; e++) {
+            size_t dst_off = (size_t)e * max_chunk_elems;
+            size_t count = (size_t)send_counts[e] * HIDDEN_DIM;
+            CUDA_CHECK(cudaMemcpy(d_quant_send + dst_off, d_quant_contig + src_off,
+                       count * sizeof(int8_t), cudaMemcpyDeviceToDevice));
+            src_off += count;
+        }
+        CUDA_CHECK(cudaFree(d_quant_contig));
+    }
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // --- WARMUP: prime NCCL/RDMA paths (3 rounds) ---
+    for (int w = 0; w < 3; w++) {
+        NCCL_CHECK(ncclAlltoAll(d_quant_send, d_quant_recv,
+                   max_chunk_elems, ncclInt8, comm, stream));
+        NCCL_CHECK(ncclAlltoAll(d_expert_output, d_final_output,
+                   max_chunk_elems, ncclFloat, comm, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // --- TIMING ---
+    cudaEvent_t ev_start, ev_stop, ev_dispatch_end, ev_compute_end, ev_combine_end;
+    CUDA_CHECK(cudaEventCreate(&ev_start));
+    CUDA_CHECK(cudaEventCreate(&ev_stop));
+    CUDA_CHECK(cudaEventCreate(&ev_dispatch_end));
+    CUDA_CHECK(cudaEventCreate(&ev_compute_end));
+    CUDA_CHECK(cudaEventCreate(&ev_combine_end));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventRecord(ev_start, stream));
+
+    // STEP 1: Dispatch (padded AlltoAll, int8)
+    NCCL_CHECK(ncclAlltoAll(d_quant_send, d_quant_recv,
+               max_chunk_elems, ncclInt8, comm, stream));
+    CUDA_CHECK(cudaEventRecord(ev_dispatch_end, stream));
+
+    // STEP 2: Expert compute — per chunk with actual token counts
+    for (int src = 0; src < nranks; src++) {
+        int tokens = recv_counts[src];
+        if (tokens == 0) continue;
+        size_t recv_off = (size_t)src * max_chunk_elems;
+        size_t recv_tok_off = (size_t)src * max_chunk_tokens;
+
+        dim3 qblk(16, 16);
+        dim3 qgrd((HIDDEN_DIM + qblk.x - 1) / qblk.x,
+                  (tokens + qblk.y - 1) / qblk.y);
+        dequantizeBlockScale<<<qgrd, qblk, 0, stream>>>(
+            d_quant_recv + recv_off,
+            d_deq_float + recv_off,
+            d_scales_recv, tokens, HIDDEN_DIM);
+
+        dim3 g1blk(TILE, TILE);
+        dim3 g1grd((GEMM1_OUT_DIM + TILE - 1) / TILE, (tokens + TILE - 1) / TILE);
+        tiledMatmul<<<g1grd, g1blk, 0, stream>>>(
+            d_deq_float + recv_off, d_W1,
+            d_gemm1_out + recv_tok_off * GEMM1_OUT_DIM,
+            tokens, GEMM1_OUT_DIM, HIDDEN_DIM);
+
+        dim3 sblk(16, 16);
+        dim3 sgrd((INTERMEDIATE_DIM + sblk.x - 1) / sblk.x, (tokens + sblk.y - 1) / sblk.y);
+        swiGLU<<<sgrd, sblk, 0, stream>>>(
+            d_gemm1_out + recv_tok_off * GEMM1_OUT_DIM,
+            d_swiglu_out + recv_tok_off * INTERMEDIATE_DIM,
+            tokens, INTERMEDIATE_DIM);
+
+        dim3 g2blk(TILE, TILE);
+        dim3 g2grd((HIDDEN_DIM + TILE - 1) / TILE, (tokens + TILE - 1) / TILE);
+        tiledMatmul<<<g2grd, g2blk, 0, stream>>>(
+            d_swiglu_out + recv_tok_off * INTERMEDIATE_DIM, d_W2,
+            d_expert_output + recv_off,
+            tokens, HIDDEN_DIM, INTERMEDIATE_DIM);
+    }
+    CUDA_CHECK(cudaEventRecord(ev_compute_end, stream));
+
+    // STEP 3: Combine (padded AlltoAll, float32)
+    NCCL_CHECK(ncclAlltoAll(d_expert_output, d_final_output,
+               max_chunk_elems, ncclFloat, comm, stream));
+    CUDA_CHECK(cudaEventRecord(ev_combine_end, stream));
+
+    CUDA_CHECK(cudaEventRecord(ev_stop, stream));
+    CUDA_CHECK(cudaEventSynchronize(ev_stop));
+
+    float t_total, t_dispatch, t_compute, t_combine;
+    CUDA_CHECK(cudaEventElapsedTime(&t_total,    ev_start,        ev_stop));
+    CUDA_CHECK(cudaEventElapsedTime(&t_dispatch, ev_start,        ev_dispatch_end));
+    CUDA_CHECK(cudaEventElapsedTime(&t_compute,  ev_dispatch_end, ev_compute_end));
+    CUDA_CHECK(cudaEventElapsedTime(&t_combine,  ev_compute_end,  ev_combine_end));
+
+    if (rank == 0) {
+        printf("\n--- RESULTS (Rank %d: Expert %d, receives %d tokens) ---\n", rank, rank, total_recv_tokens);
+        printf("Time: %.4f ms\n", t_total);
+        printf("  Dispatch AlltoAll (padded):  %.4f ms\n", t_dispatch);
+        printf("  Expert compute:              %.4f ms  (%d tokens)\n", t_compute, total_recv_tokens);
+        printf("  Combine AlltoAll (padded):   %.4f ms\n", t_combine);
+        printf("  Total Compute: %.4f ms\n", t_compute);
+        printf("  Total Comm:    %.4f ms\n", t_dispatch + t_combine);
+    }
+
+    // Print rank 1 too
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 1) {
+        printf("\n--- RESULTS (Rank %d: Expert %d, receives %d tokens) ---\n", rank, rank, total_recv_tokens);
+        printf("Time: %.4f ms\n", t_total);
+        printf("  Dispatch AlltoAll (padded):  %.4f ms\n", t_dispatch);
+        printf("  Expert compute:              %.4f ms  (%d tokens)\n", t_compute, total_recv_tokens);
+        printf("  Combine AlltoAll (padded):   %.4f ms\n", t_combine);
+        printf("  Total Compute: %.4f ms\n", t_compute);
+        printf("  Total Comm:    %.4f ms\n", t_dispatch + t_combine);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    // Verification
+    if (rank == 0) printf("Verification: PASS (simplified for sparse routing)\n");
+    fflush(stdout);
+
+    CUDA_CHECK(cudaEventDestroy(ev_start));
+    CUDA_CHECK(cudaEventDestroy(ev_stop));
+    CUDA_CHECK(cudaEventDestroy(ev_dispatch_end));
+    CUDA_CHECK(cudaEventDestroy(ev_compute_end));
+    CUDA_CHECK(cudaEventDestroy(ev_combine_end));
+    CUDA_CHECK(cudaFree(d_input_float));
+    CUDA_CHECK(cudaFree(d_quant_send));
+    CUDA_CHECK(cudaFree(d_quant_recv));
+    CUDA_CHECK(cudaFree(d_deq_float));
+    CUDA_CHECK(cudaFree(d_expert_output));
+    CUDA_CHECK(cudaFree(d_final_output));
+    CUDA_CHECK(cudaFree(d_scales_send));
+    CUDA_CHECK(cudaFree(d_scales_recv));
+    CUDA_CHECK(cudaFree(d_gemm1_out));
+    CUDA_CHECK(cudaFree(d_swiglu_out));
+    CUDA_CHECK(cudaFree(d_W1));
+    CUDA_CHECK(cudaFree(d_W2));
+    CUDA_CHECK(cudaStreamDestroy(stream));
+}
+
+int main(int argc, char* argv[]) {
+    MPI_Init(&argc, &argv);
+    int rank, nranks;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nranks);
+    if (nranks != 2) {
+        if (rank == 0) printf("This sparse benchmark requires exactly 2 ranks.\n");
+        MPI_Finalize();
+        return 0;
+    }
+    MPI_Comm local_comm;
+    MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, rank, MPI_INFO_NULL, &local_comm);
+    int local_rank;
+    MPI_Comm_rank(local_comm, &local_rank);
+    CUDA_CHECK(cudaSetDevice(local_rank));
+
+    ncclUniqueId id;
+    if (rank == 0) NCCL_CHECK(ncclGetUniqueId(&id));
+    MPI_Bcast(&id, sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD);
+    ncclComm_t comm;
+    NCCL_CHECK(ncclCommInitRank(&comm, nranks, id, rank));
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    run_moe_alltoall(rank, nranks, comm);
+
+    NCCL_CHECK(ncclCommDestroy(comm));
+    MPI_Comm_free(&local_comm);
+    MPI_Finalize();
+    return 0;
+}
+
+```
+
+## Automated Analysis
+
+## CUDA Source Analysis: /mnt/nfs/yoga/cufuse/cuda_evolve/examples/ds_v3_moe_gin_2GPU_internode/ds_v3_moe_host.cu
+Lines: 378
+
+### Communication Graph
+
+  Node 1: ncclAlltoAll (line 227)
+  ├── In function: run_moe_alltoall
+  ├── In loop (line 226): for (int w = 0; w < 3; w++)
+  ├── Stream: stream
+  ├── Communicator: comm
+  ├── Data type: ncclInt8
+  ├── Count: max_chunk_elems
+  ├── In-place: No
+  │
+  ├── Send buffer: d_quant_send
+  │   ├── Allocated: cudaMalloc (line 158, size: padded_total_elems * sizeof(int8_t)) [needs ncclMemAlloc]
+  │   ├── Produced by: cudaMemcpy/cudaMemset (line 170)
+  │   ├── Produced by: cudaMemcpy/cudaMemset (line 211)
+  │
+  ├── Recv buffer: d_quant_recv
+  │   ├── Allocated: cudaMalloc (line 159, size: padded_total_elems * sizeof(int8_t)) [needs ncclMemAlloc]
+  │   ├── Consumed by: dequantizeBlockScale<<<...>>> (line 260)
+  │
+  └── Device-side transformation:
+      ├── Pattern: AlltoAll: rank r sends sendbuf[peer*chunk] → peer's recvbuf[r*chunk] + local self-copy
+      └── Buffers needing ncclMemAlloc: d_quant_send, d_quant_recv
+
+  Node 2: ncclAlltoAll (line 229)
+  ├── In function: run_moe_alltoall
+  ├── In loop (line 226): for (int w = 0; w < 3; w++)
+  ├── Stream: stream
+  ├── Communicator: comm
+  ├── Data type: ncclFloat
+  ├── Count: max_chunk_elems
+  ├── In-place: No
+  │
+  ├── Send buffer: d_expert_output
+  │   ├── Allocated: cudaMalloc (line 161, size: padded_total_elems * sizeof(float)) [needs ncclMemAlloc]
+  │   ├── Produced by: (no kernel producer found — check host-side init)
+  │   └── Also consumed by: tiledMatmul<<<...>>> (line 281)
+  │
+  ├── Recv buffer: d_final_output
+  │   ├── Allocated: cudaMalloc (line 162, size: padded_total_elems * sizeof(float)) [needs ncclMemAlloc]
+  │   ├── Consumed by: (no kernel consumer found — check host-side readback)
+  │
+  └── Device-side transformation:
+      ├── Pattern: AlltoAll: rank r sends sendbuf[peer*chunk] → peer's recvbuf[r*chunk] + local self-copy
+      └── Buffers needing ncclMemAlloc: d_expert_output, d_final_output
+
+  Node 3: ncclAlltoAll (line 246)
+  ├── In function: run_moe_alltoall
+  ├── Stream: stream
+  ├── Communicator: comm
+  ├── Data type: ncclInt8
+  ├── Count: max_chunk_elems
+  ├── In-place: No
+  │
+  ├── Send buffer: d_quant_send
+  │   ├── Allocated: cudaMalloc (line 158, size: padded_total_elems * sizeof(int8_t)) [needs ncclMemAlloc]
+  │   ├── Produced by: cudaMemcpy/cudaMemset (line 170)
+  │   ├── Produced by: cudaMemcpy/cudaMemset (line 211)
+  │
+  ├── Recv buffer: d_quant_recv
+  │   ├── Allocated: cudaMalloc (line 159, size: padded_total_elems * sizeof(int8_t)) [needs ncclMemAlloc]
+  │   ├── Consumed by: dequantizeBlockScale<<<...>>> (line 260)
+  │
+  └── Device-side transformation:
+      ├── Pattern: AlltoAll: rank r sends sendbuf[peer*chunk] → peer's recvbuf[r*chunk] + local self-copy
+      └── Buffers needing ncclMemAlloc: d_quant_send, d_quant_recv
+
+  Node 4: ncclAlltoAll (line 289)
+  ├── In function: run_moe_alltoall
+  ├── Stream: stream
+  ├── Communicator: comm
+  ├── Data type: ncclFloat
+  ├── Count: max_chunk_elems
+  ├── In-place: No
+  │
+  ├── Send buffer: d_expert_output
+  │   ├── Allocated: cudaMalloc (line 161, size: padded_total_elems * sizeof(float)) [needs ncclMemAlloc]
+  │   ├── Produced by: tiledMatmul<<<...>>> (line 281)
+  │
+  ├── Recv buffer: d_final_output
+  │   ├── Allocated: cudaMalloc (line 162, size: padded_total_elems * sizeof(float)) [needs ncclMemAlloc]
+  │   ├── Consumed by: (no kernel consumer found — check host-side readback)
+  │
+  └── Device-side transformation:
+      ├── Pattern: AlltoAll: rank r sends sendbuf[peer*chunk] → peer's recvbuf[r*chunk] + local self-copy
+      └── Buffers needing ncclMemAlloc: d_expert_output, d_final_output
+
+### Execution Order (per function)
+  run_moe_alltoall: quantizeBlockScale<<<...>>> (line 206) [compute] → ncclAlltoAll (line 227) [communicate] → ncclAlltoAll (line 229) [communicate] → ncclAlltoAll (line 246) [communicate] → dequantizeBlockScale<<<...>>> (line 260) [compute] → tiledMatmul<<<...>>> (line 267) [compute] → swiGLU<<<...>>> (line 274) [compute] → tiledMatmul<<<...>>> (line 281) [compute] → ncclAlltoAll (line 289) [communicate]
+
+### Structure
+  kernels(4): quantizeBlockScale, dequantizeBlockScale, tiledMatmul, swiGLU
+  functions(2): run_moe_alltoall, main
+  allocations: 13 cudaMalloc
+  host syncs: 11
+
+
+## Task (Stage A — infrastructure only)
+
+Add GIN infrastructure to this program. Do NOT replace any host-side NCCL collective calls yet (ncclAllReduce, ncclAllGather, etc.).
+
+You must:
+1. Add `#include <nccl_device.h>`
+2. Replace `cudaMalloc` for communicated buffers with `ncclMemAlloc` (GIN requires registered memory)
+3. Add remote landing buffer(s) with `ncclMemAlloc` for peer data
+4. Add `ncclCommWindowRegister()` for all communicated buffers (`NCCL_WIN_COLL_SYMMETRIC`)
+5. Add `ncclDevCommCreate()` with correct requirements (ginContextCount, ginSignalCount, etc.)
+6. Update cleanup: `ncclCommWindowDeregister`, `ncclMemFree`, `ncclDevCommDestroy`
+7. KEEP all host-side NCCL collective calls exactly as they are — do NOT replace them yet.
+
+**IMPORTANT**: Place ALL GIN-specific configuration variables (e.g. CTA counts, barrier counts, signal counts) AFTER the `ncclMemAlloc` calls, alongside the window registration and `ncclDevCommCreate` section. Do NOT place them before the non-communicated `cudaMalloc` calls.
+### Infrastructure pattern
+
+```cpp
+#include <nccl_device.h>
+
+// GIN-compatible buffers (replace cudaMalloc):
+NCCL_CHECK(ncclMemAlloc((void**)&buf, size));
+NCCL_CHECK(ncclMemAlloc((void**)&buf_remote, size));  // landing buffer
+
+// Register windows:
+ncclWindow_t send_win, recv_win;
+NCCL_CHECK(ncclCommWindowRegister(host_comm, buf, size, &send_win, NCCL_WIN_COLL_SYMMETRIC));
+NCCL_CHECK(ncclCommWindowRegister(host_comm, buf_remote, size, &recv_win, NCCL_WIN_COLL_SYMMETRIC));
+
+// Device communicator:
+ncclDevComm devComm;
+ncclDevCommRequirements reqs;
+memset(&reqs, 0, sizeof(reqs));
+reqs.ginContextCount = 1;
+reqs.ginSignalCount = <appropriate_count>;
+NCCL_CHECK(ncclDevCommCreate(host_comm, &reqs, &devComm));
+(void)cudaGetLastError();  // MUST clear stale CUDA error
+```
+**CRITICAL**: You MUST add `(void)cudaGetLastError();` immediately after `ncclDevCommCreate()`. It internally triggers CUDA operations that leave a stale `cudaErrorNotPermitted` in the error register. If you don't clear it, the next `cudaGetLastError()` call will crash with "operation not permitted".
+
+The program must still compile, run, and pass verification with the original collectives.
+Return the COMPLETE file between ```cuda and ``` markers.
+
+## NCCL Device API Reference
+
+## NCCL Device API Overview
+
+Host-side setup is complete. Focus on device-kernel usage only.
+
+**Core Concepts:**
+- **LSA (Load/Store Accessible)**: Direct memory access to local GPU peers
+- **GIN (GPU-Initiated Networking)**: One-sided network transfers to remote GPUs
+- **Teams**: Subsets of ranks - World (all), LSA (local), Rail (network)
+- **Thread Groups**: Block (`ncclCoopCta`), Warp (`ncclCoopWarp`), Thread (`ncclCoopThread`)
+
+**Key Principles:**
+- Only use device APIs inside kernels (no host-side calls)
+- Synchronize appropriately between writes and reads
+
+
+## NCCL GIN (GPU-Initiated Networking) API Documentation
+
+### Overview
+The GIN API enables device-initiated, one-sided network communication with remote peers.
+GIN is supported since NCCL 2.28.7. All operations are device-side only.
+
+### Core Components
+
+#### ncclGin Class
+**Purpose**: Manages device-initiated one-sided network transfers to remote peers.
+
+**Constructor**:
+```cpp
+ncclGin(ncclDevComm const &comm, int contextIndex)
+```
+
+**Parameters**:
+- `comm`: Device communicator created via `ncclDevCommCreate()`
+- `contextIndex`: Network communication channel identifier. Multiple contexts allow spreading traffic across connections to avoid bottlenecks.
+
+### Data Transfer Operations
+
+#### put
+Executes a device-initiated, one-sided data transfer from local buffer to remote buffer on a peer.
+
+**Signature**:
+```cpp
+void put(ncclTeam team, int peer,
+         ncclWindow_t dstWnd, size_t dstOffset,
+         ncclWindow_t srcWnd, size_t srcOffset,
+         size_t bytes,
+         RemoteAction remoteAction = ncclGin_None{},
+         LocalAction localAction = ncclGin_None{},
+         Coop coop = ncclCoopThread{},
+         DescriptorSmem descriptor = ncclGin_None{},
+         cuda::thread_scope alreadyReleased = cuda::thread_scope_thread,
+         cuda::thread_scope expected_scope = cuda::thread_scope_device)
+```
+
+**Key Parameters**:
+- `team`: Team handle (e.g., from `ncclTeamWorld()`)
+- `peer`: Target peer rank within the team
+- `dstWnd`, `dstOffset`: Destination window and offset
+- `srcWnd`, `srcOffset`: Source window and offset
+- `bytes`: Number of bytes to transfer
+- `remoteAction`: Optional signal increment on remote peer (e.g., `ncclGin_SignalInc{signalIndex}`)
+- `localAction`: Optional counter increment on local peer (e.g., `ncclGin_CounterInc{counterIndex}`)
+
+**Ordering Guarantee**: Visibility of attached signals implies visibility of the put data and all preceding puts to the same peer (when using the same GIN context).
+
+#### flush
+Ensures pending transfers are locally consumed, meaning their source buffers are safe to reuse.
+
+**Signature**:
+```cpp
+void flush(Coop coop, cuda::memory_order ord = cuda::memory_order_acquire)
+```
+
+### Signals (Remote Actions)
+
+Signals are 64-bit integer values manipulated atomically, used for remote notification.
+The signal index type is a 32-bit identifier; the signal *value* read/written is 64-bit.
+
+#### Signal Types
+- `ncclGinSignal_t`: 32-bit signal index (`uint32_t`); the signal value is `uint64_t`
+- `ncclGin_SignalInc`: Increment signal by 1 on remote peer
+- `ncclGin_SignalAdd`: Add specific value to signal on remote peer
+
+#### Signal Methods
+
+**readSignal**: Read current signal value
+```cpp
+uint64_t readSignal(ncclGinSignal_t signal, int bits = 64,
+                    cuda::memory_order ord = cuda::memory_order_acquire)
+```
+
+**waitSignal**: Wait until signal reaches at least the specified value
+```cpp
+void waitSignal(Coop coop, ncclGinSignal_t signal, uint64_t least,
+                int bits = 64, cuda::memory_order ord = cuda::memory_order_acquire)
+```
+
+**resetSignal**: Reset signal to zero
+```cpp
+void resetSignal(ncclGinSignal_t signal)
+```
+
+**signal**: Send standalone signal without data transfer
+```cpp
+void signal(ncclTeam team, int peer, RemoteAction remoteAction,
+            Coop coop = ncclCoopThread{},
+            DescriptorSmem descriptor = ncclGin_None{},
+            cuda::thread_scope alreadyReleased = cuda::thread_scope_thread,
+            cuda::thread_scope expected_scope = cuda::thread_scope_device)
+```
+
+**Rolling Comparison**: Signal comparisons use rolling logic to handle unsigned overflow.
+
+### Counters (Local Actions)
+
+Counters track local completion of operations, limited to 56-bit values.
+
+#### Counter Types
+- `ncclGinCounter_t`: 32-bit counter index (`uint32_t`); counter values are `uint64_t` (max 56 bits usable)
+- `ncclGin_CounterInc`: Increment counter locally on source peer
+
+#### Counter Methods
+
+**readCounter**: Read current counter value
+```cpp
+uint64_t readCounter(ncclGinCounter_t counter, int bits = 56,
+                     cuda::memory_order ord = cuda::memory_order_acquire)
+```
+
+**waitCounter**: Wait until counter reaches at least the specified value
+```cpp
+void waitCounter(Coop coop, ncclGinCounter_t counter, uint64_t least,
+                 int bits = 56, cuda::memory_order ord = cuda::memory_order_acquire)
+```
+
+**resetCounter**: Reset counter to zero
+```cpp
+void resetCounter(ncclGinCounter_t counter)
+```
+
+### GIN Barriers
+
+#### ncclGinBarrierSession
+**Purpose**: Network barrier synchronization across GIN-accessible peers.
+
+**Constructors**:
+```cpp
+// Rail-scoped barrier
+ncclGinBarrierSession(Coop coop, ncclGin gin, ncclTeamTagRail tag, uint32_t index)
+
+// General-purpose barrier
+ncclGinBarrierSession(Coop coop, ncclGin gin, ncclTeam team,
+                      ncclGinBarrierHandle handle, uint32_t index)
+```
+
+**sync Method**:
+```cpp
+void sync(Coop coop, cuda::memory_order order, ncclGinFenceLevel fence)
+```
+
+**Parameters**:
+- `order`: Memory ordering (`cuda::memory_order_relaxed`, `cuda::memory_order_release`, etc.)
+- `fence`: Fence level for GIN operations
+  - `ncclGinFenceLevel::Relaxed`: The only fence level in NCCL 2.28.9
+
+### Usage Patterns
+
+#### Basic GIN Put with Signal
+```cpp
+ncclTeam world = ncclTeamWorld(devComm);
+ncclGin gin { devComm, 0 };  // context 0
+
+// Read initial signal value
+uint64_t signalValue = gin.readSignal(signalIndex);
+
+// Issue puts to remote peers with signal increment
+for (int r = 0; r < world.nRanks; ++r) {
+    if (r != world.rank) {
+        gin.put(world, r,
+                recvwin, recvOffset + world.rank * bytes,
+                sendwin, sendOffset + r * bytes,
+                bytes,
+                ncclGin_SignalInc{signalIndex});
+    }
+}
+
+// Wait for all remote peers to complete their puts
+gin.waitSignal(ncclCoopCta(), signalIndex, signalValue + numRemotePeers);
+
+// Flush to ensure source buffers can be reused
+gin.flush(ncclCoopCta());
+```
+
+#### GIN Barrier Pattern (World team — general constructor)
+```cpp
+// World-team barrier requires the general constructor (ncclTeam + ncclGinBarrierHandle).
+// There is NO convenience constructor for ncclTeamTagWorld; only ncclTeamTagRail has one.
+ncclGinBarrierSession<ncclCoopCta> bar {
+    ncclCoopCta(),
+    gin,                          // ncclGin instance (2nd arg)
+    ncclTeamWorld(devComm),       // ncclTeam (3rd arg)
+    devComm.railGinBarrier,       // ncclGinBarrierHandle (4th arg)
+    blockIdx.x                    // barrier index (5th arg)
+};
+
+// Initial barrier with relaxed ordering
+bar.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+
+// Perform GIN operations...
+
+// Final barrier with release semantics
+bar.sync(ncclCoopCta(), cuda::memory_order_release, ncclGinFenceLevel::Relaxed);
+```
+
+#### GIN Barrier Pattern (Rail team — convenience constructor)
+```cpp
+ncclGinBarrierSession<ncclCoopCta> bar {
+    ncclCoopCta(),
+    gin,                          // ncclGin instance
+    ncclTeamTagRail{},            // convenience tag
+    blockIdx.x                    // barrier index
+};
+bar.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+```
+
+### Setup Requirements (Host-Side)
+
+Enable GIN support during communicator creation:
+```cpp
+ncclDevCommRequirements reqs;
+memset(&reqs, 0, sizeof(reqs));
+reqs.railGinBarrierCount = /* number needed */;
+reqs.ginSignalCount = /* number needed */;
+reqs.ginCounterCount = /* number needed */;
+ncclDevCommCreate(comm, &reqs, &devComm);
+(void)cudaGetLastError();  // MUST clear stale CUDA error left by ncclDevCommCreate
+```
+
+GIN is available when the NCCL communicator connects ranks over InfiniBand/RoCE.
+For intra-node PCIe A100 GPUs, GIN uses GDAKI (GPU Direct Async Kernel-Initiated).
+
+
+## NCCL Pure GIN Code Examples (from official AlltoAll GIN example)
+
+These patterns are taken from the NVIDIA NCCL repo `examples/06_device_api/02_alltoall_gin`.
+Use them when evolving GIN kernels for network-based, device-initiated communication.
+
+### Host-side: Device communicator creation (GIN only)
+
+CTA count must match railGinBarrierCount for proper barrier synchronization.
+
+```cpp
+#define NCCL_DEVICE_CTA_COUNT 1
+#define NCCL_DEVICE_THREADS_PER_CTA 512
+
+ncclDevComm devComm;
+ncclDevCommRequirements reqs;
+memset(&reqs, 0, sizeof(reqs));
+reqs.railGinBarrierCount = NCCL_DEVICE_CTA_COUNT;  // GIN barriers for network sync
+reqs.ginSignalCount = 1;                            // GIN signals for completion
+NCCLCHECK(ncclDevCommCreate(comm, &reqs, &devComm));
+(void)cudaGetLastError();  // MUST clear stale CUDA error left by ncclDevCommCreate
+```
+
+### Host-side: Symmetric memory and window registration
+
+Device API requires symmetric memory; use ncclMemAlloc and NCCL_WIN_COLL_SYMMETRIC.
+
+```cpp
+void* d_sendbuff;
+void* d_recvbuff;
+ncclWindow_t send_win;
+ncclWindow_t recv_win;
+
+NCCLCHECK(ncclMemAlloc(&d_sendbuff, size_bytes));
+NCCLCHECK(ncclMemAlloc(&d_recvbuff, size_bytes));
+
+NCCLCHECK(ncclCommWindowRegister(comm, d_sendbuff, size_bytes, &send_win, NCCL_WIN_COLL_SYMMETRIC));
+NCCLCHECK(ncclCommWindowRegister(comm, d_recvbuff, size_bytes, &recv_win, NCCL_WIN_COLL_SYMMETRIC));
+```
+
+### Device-side: GIN barrier (coordinate across ranks over network)
+
+GIN barriers enable cross-node synchronization from device code. Each block uses blockIdx.x
+as its barrier index so blocks can progress independently while coordinating with other nodes.
+
+```cpp
+ncclGin gin { devComm, 0 };
+ncclGinBarrierSession<ncclCoopCta> bar {
+    ncclCoopCta(),
+    gin,
+    ncclTeamWorld(devComm),
+    devComm.railGinBarrier,
+    blockIdx.x
+};
+bar.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+```
+
+### Device-side: readSignal before puts, waitSignal after (rolling value)
+
+Read initial signal value, issue puts that increment the remote signal, then wait until
+signal reaches initialValue + number of expected increments.
+
+```cpp
+unsigned int signalIndex = 0;
+uint64_t signalValue = gin.readSignal(signalIndex);
+
+// Issue puts (each put can use ncclGin_SignalInc{signalIndex})
+for (int r = tid; r < devComm.nRanks; r += nthreads) {
+    gin.put(ncclTeamWorld(devComm), r,
+            recvwin, recvoffset + devComm.rank * size,
+            sendwin, sendoffset + r * size,
+            size, ncclGin_SignalInc{signalIndex});
+}
+
+// Wait for all remote puts to complete (rolling comparison handles overflow)
+gin.waitSignal(ncclCoopCta(), signalIndex, signalValue + devComm.nRanks);
+gin.flush(ncclCoopCta());
+```
+
+### Device-side: Full pure GIN kernel sketch (AlltoAll-style)
+
+```cpp
+template <typename T>
+__global__ void PureGinAlltoAllKernel(ncclWindow_t sendwin, size_t sendoffset,
+                                      ncclWindow_t recvwin, size_t recvoffset,
+                                      size_t count, ncclDevComm devComm) {
+    int ginContext = 0;
+    unsigned int signalIndex = 0;
+    ncclGin gin { devComm, ginContext };
+    uint64_t signalValue = gin.readSignal(signalIndex);
+
+    ncclGinBarrierSession<ncclCoopCta> bar {
+        ncclCoopCta(), gin, ncclTeamWorld(devComm),
+        devComm.railGinBarrier, blockIdx.x
+    };
+    bar.sync(ncclCoopCta(), cuda::memory_order_relaxed, ncclGinFenceLevel::Relaxed);
+
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
+    int nthreads = blockDim.x * gridDim.x;
+    const size_t size = count * sizeof(T);
+
+    for (int r = tid; r < devComm.nRanks; r += nthreads) {
+        gin.put(ncclTeamWorld(devComm), r,
+                recvwin, recvoffset + devComm.rank * size,
+                sendwin, sendoffset + r * size,
+                size, ncclGin_SignalInc{signalIndex});
+    }
+
+    gin.waitSignal(ncclCoopCta(), signalIndex, signalValue + devComm.nRanks);
+    gin.flush(ncclCoopCta());
+}
+```
+
+### When to use pure GIN (from official README)
+
+- Communication between ranks that cannot use LSA (e.g. different nodes)
+- Network-based collectives in multi-node environments
+- All communication must go through the network
+
+### Performance notes (from official README)
+
+- Signal-based completion enables asynchronous operation patterns
+- Multiple GIN contexts can improve parallel communication performance
+- CTA count must match railGinBarrierCount for proper barrier synchronization
+
+
+## GIN Kernel Signature & Host Launch Pattern (from verified working reference)
+
+### GIN Kernel Signature
+
+The GIN kernel receives ncclDevComm BY VALUE (not by pointer):
+```cpp
+__global__ void ginKernel(
+    ncclDevComm devComm,           // BY VALUE — this is correct
+    ncclWindow_t local_win,        // source window (registered over local buffer)
+    ncclWindow_t remote_win,       // destination window (registered over remote receive buffer)
+    int* C_local,                  // local data pointer (for accumulation after transfer)
+    int* C_remote,                 // remote receive buffer pointer
+    int row_offset, int chunk_rows,
+    int chunk_id)                  // used for rolling signal counting
+{
+    ncclGin gin(devComm, 0);       // context 0
+    int target_rank = 1 - devComm.rank;  // peer rank (2-GPU case)
+
+    // Only leader thread issues put
+    if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
+        size_t chunk_bytes = (size_t)chunk_rows * N * sizeof(int);
+        size_t offset_bytes = (size_t)row_offset * N * sizeof(int);
+
+        gin.put(ncclTeamWorld(devComm), target_rank,
+                remote_win, offset_bytes,     // dst: peer's remote_win
+                local_win,  offset_bytes,     // src: my local_win
+                chunk_bytes,
+                ncclGin_SignalInc{0});         // increment signal index 0
+
+        gin.flush(ncclCoopThread());  // MUST match the threads that issued put
+    }
+
+    // ALL threads wait for remote data (rolling signal: chunk_id + 1)
+    gin.waitSignal(ncclCoopThread(), 0, chunk_id + 1);
+
+    // Accumulate: C_local += C_remote
+    int local_row  = blockIdx.y * blockDim.y + threadIdx.y;
+    int global_row = row_offset + local_row;
+    int global_col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (global_row < row_offset + chunk_rows && global_col < N) {
+        int idx = global_row * N + global_col;
+        C_local[idx] += C_remote[idx];
+    }
+}
+```
+
+### Host-side Launch (inside chunk loop)
+
+```cpp
+for (int i = 0; i < NUM_CHUNKS; i++) {
+    int offset = i * rows_per_chunk;
+    matMulCompute<<<grid, block, 0, stream>>>(d_A, d_B, d_C_local, offset, rows_per_chunk);
+    ginKernel<<<grid, block, 0, stream>>>(
+        d_comm, local_win, remote_win, d_C_local, d_C_remote,
+        offset, rows_per_chunk, i);
+}
+```
+
+### Key facts
+- `ncclDevComm` is passed by value, NOT pointer
+- `ncclGin_SignalInc{0}` — field is `ncclGinSignal_t` (uint32_t), 0 is signal index
+- Rolling signal: chunk i waits for signal >= i+1
+- `gin.flush(ncclCoopThread())` after leader-thread put (Coop must match who issued puts)
+- `gin.waitSignal(ncclCoopThread(), ...)` — each thread waits independently
+- After ncclDevCommCreate on host, call `(void)cudaGetLastError()` to clear stale error
+
+
+## NCCL Thread Groups (Cooperative Groups)
+
+### Overview
+Thread groups specify which threads within a CTA participate in NCCL operations.
+Many device API functions take a cooperative group parameter.
+
+### Predefined Thread Groups
+
+**ncclCoopThread()** - Single thread participation
+**ncclCoopWarp()** - Warp-level (32 threads)
+**ncclCoopCta()** - Block-level (all threads) - **Most commonly used**
+
+### Usage Patterns
+
+#### Full CTA Synchronization (Most Common)
+```cpp
+// Create barrier with ncclCoopCta
+ncclLsaBarrierSession<ncclCoopCta> lsaBar {
+    ncclCoopCta(), devComm, ncclTeamLsa(devComm),
+    devComm.lsaBarrier, blockIdx.x
+};
+
+// All threads synchronize
+lsaBar.sync(ncclCoopCta(), cuda::memory_order_release);
+gin.flush(ncclCoopCta());
+```
+
+#### Leader Thread Pattern
+```cpp
+// Only thread 0 issues operation
+if (threadIdx.x == 0) {
+    gin.put(world, peer, dstWnd, dstOffset, srcWnd, srcOffset, bytes,
+            ncclGin_SignalInc{signalIndex}, {}, ncclCoopThread());
+}
+// All threads wait
+gin.waitSignal(ncclCoopCta(), signalIndex, expectedValue);
+```
+
+#### Warp-Level Operations
+```cpp
+// All 32 threads in each warp must participate when using ncclCoopWarp.
+// Do NOT guard with `if (threadIdx.x % 32 == 0)` — that would leave
+// only lane 0, which contradicts the warp cooperative group contract.
+int warpId = threadIdx.x / 32;
+gin.put(world, peer + warpId, dstWnd, dstOffset,
+        srcWnd, srcOffset, bytes,
+        ncclGin_SignalInc{signalIndex}, ncclGin_None{}, ncclCoopWarp());
+```
+
+### Custom Thread Groups
+
+Implement custom groups by providing three methods:
+- `thread_rank()`: Thread identifier within group
+- `size()`: Total threads in group
+- `sync()`: Synchronization mechanism
+
+NCCL is also compatible with CUDA cooperative groups (`cooperative_groups::thread_block`, etc.).
+
+### Guidelines
+
+- **ncclCoopCta()**: Default choice for most operations, full block synchronization
+- **ncclCoopWarp()**: For warp-granular operations, performance optimization
+- **ncclCoopThread()**: Single thread operations, typically with leader thread pattern
+
+
+## NCCL Teams
+
+### Overview
+Teams represent subsets of ranks within an NCCL communicator for scoped communication.
+
+### Predefined Teams
+
+**ncclTeamWorld(devComm)** - All ranks in the communicator (global scope)
+**ncclTeamLsa(devComm)** - Ranks accessible via load/store operations (local GPU group)
+**ncclTeamRail(devComm)** - Ranks directly accessible over network (rail topology)
+
+### Team Structure
+
+The `ncclTeam` type contains:
+- `nRanks`: Number of ranks in the team
+- `rank`: Current rank position within the team (0-indexed)
+- `stride`: Spacing between ranks
+
+**Properties**:
+- World and LSA teams are contiguous (stride = 1)
+- Rail teams are typically non-contiguous (stride = LSA team size)
+
+### Usage Patterns
+
+#### Accessing Team Properties
+```cpp
+ncclTeam world = ncclTeamWorld(devComm);
+ncclTeam lsa = ncclTeamLsa(devComm);
+ncclTeam rail = ncclTeamRail(devComm);
+
+// Use team properties
+for (int r = 0; r < world.nRanks; ++r) {
+    // Communicate with rank r in world team
+}
+
+for (int lp = 0; lp < lsa.nRanks; ++lp) {
+    // Access LSA peer lp
+    float* peer = (float*)ncclGetLsaPointer(window, offset, lp);
+}
+```
+
+#### Team-Scoped GIN Operations
+```cpp
+ncclTeam world = ncclTeamWorld(devComm);
+
+// Put to specific peer in world team
+gin.put(world, peerRank, dstWnd, dstOffset, srcWnd, srcOffset, bytes,
+        ncclGin_SignalInc{signalIndex});
+```
+
+#### Hybrid LSA + GIN Pattern
+```cpp
+ncclTeam world = ncclTeamWorld(devComm);
+ncclTeam lsa = ncclTeamLsa(devComm);
+
+// The LSA team is contiguous in world rank space.
+// world.rank is this GPU's world rank; lsa.rank is this GPU's position
+// within the LSA team. The first world rank in the LSA group is:
+int lsaWorldStart = world.rank - lsa.rank;
+
+// Iterate over world, distinguish LSA vs non-LSA peers
+for (int r = 0; r < world.nRanks; ++r) {
+    if (r >= lsaWorldStart && r < lsaWorldStart + lsa.nRanks) {
+        // Use LSA for this peer (convert world rank → LSA rank)
+        int lsaPeer = r - lsaWorldStart;
+        float* peer = (float*)ncclGetLsaPointer(recvwin, offset, lsaPeer);
+        peer[idx] = data;
+    } else {
+        // Use GIN for remote peer
+        gin.put(world, r, recvwin, offset, sendwin, offset, bytes,
+                ncclGin_SignalInc{signalIndex});
+    }
+}
+```
+
+### Guidelines
+
+- **World team**: Use for global all-to-all communication or when addressing all ranks
+- **LSA team**: Use for direct memory access within local GPU group
+- **Rail team**: Use for optimized network topology communication (advanced)
+
+
+---
+
+## NCCL Headers
+
+## nccl_device/gin.h — GIN Session API (authoritative header)
+
+```cpp
+// ncclGin (alias for ncclGin_BackendMask<NCCL_GIN_BACKEND_MASK_ALL>)
+//
+// Construct with: ncclGin gin(devComm, contextIndex);
+//   contextIndex is typically 0 (must be < ginContextCount in requirements).
+
+// Completion action types for put():
+struct ncclGin_None {};                         // No remote action / no local action
+struct ncclGin_SignalAdd { ncclGinSignal_t signal; uint64_t value; };
+struct ncclGin_SignalInc { ncclGinSignal_t signal; };   // Equivalent to SignalAdd{+1}
+// SignalInc: for a given signal, all operations between successive reset()'s
+// must either all be SignalInc or all not SignalInc.
+struct ncclGin_CounterInc { ncclGinCounter_t counter; };
+struct ncclGin_DescriptorSmem { ncclGinDescriptorSmem* descriptor; };
+
+// ---- put (window+offset variant) ----
+// Puts bytes from local srcWnd+srcOffset to peer's dstWnd+dstOffset.
+// RemoteAction: signal action on the *receiver* when put completes. Signal is
+//   visible only after this put AND all preceding puts on this context to the
+//   same peer have settled.
+// LocalAction: action locally when source buffer has been consumed.
+// Coop: set of threads participating (default ncclCoopThread).
+template<
+  typename RemoteAction = ncclGin_None,
+  typename LocalAction = ncclGin_None,
+  typename Coop = ncclCoopThread,
+  typename DescriptorSmem = ncclGin_None>
+void put(
+  ncclTeam, int peer,
+  ncclWindow_t dstWnd, size_t dstOffset,
+  ncclWindow_t srcWnd, size_t srcOffset, size_t bytes,
+  RemoteAction = ncclGin_None{},
+  LocalAction = ncclGin_None{},
+  Coop = ncclCoopThread{},
+  DescriptorSmem = ncclGin_None{},
+  cuda::thread_scope alreadyReleased = cuda::thread_scope_thread,
+  cuda::thread_scope expected_scope = cuda::thread_scope_device) const;
+
+// ---- put (ncclSymPtr variant) ----
+template<typename T, ...same template args...>
+void put(ncclTeam, int peer,
+  ncclSymPtr<T> dstElts, ncclSymPtr<T> srcElts, size_t nElts, ...) const;
+
+// ---- putValue (write a scalar <= 8 bytes to remote) ----
+template<typename T, typename RemoteAction=ncclGin_None, typename Coop=ncclCoopThread, ...>
+void putValue(ncclTeam, int peer,
+  ncclWindow_t dstWnd, size_t dstOffset, T value, ...) const;
+
+// ---- signal (signal without data) ----
+template<typename RemoteAction, typename Coop=ncclCoopThread, ...>
+void signal(ncclTeam, int peer, RemoteAction, Coop = ncclCoopThread(), ...) const;
+
+// ---- flush ----
+// All source buffers from put's from any thread in this coop will be safe to reuse.
+// Flush does NOT guarantee that data has settled in remote memory.
+// IMPORTANT: The Coop must match the threads that actually issued the puts.
+//   e.g. if only thread (0,0) issued puts, use ncclCoopThread, NOT ncclCoopCta.
+template<typename Coop>
+void flush(Coop, cuda::memory_order ord = cuda::memory_order_acquire) const;
+
+// ---- Signal/Counter wait ----
+// Uses "rolling" comparison: rolling_less_equal(supplied, internal).
+// Counters use max 56 bits. Signals use 64 bits by default.
+
+uint64_t readCounter(ncclGinCounter_t counter, int bits=56, ...) const;
+
+template<typename Coop>
+void waitCounter(Coop, ncclGinCounter_t counter, uint64_t least, int bits=56, ...) const;
+
+// Signal shadow: user-manipulable mirror of signal value.
+uint64_t* getSignalShadowPtr(ncclGinSignal_t signal) const;
+void increaseSignalShadow(ncclGinSignal_t signal, uint64_t delta) const;
+
+uint64_t readSignal(ncclGinSignal_t signal, int bits=64, ...) const;
+
+// Wait for signal to meet or exceed 'least'.
+template<typename Coop>
+void waitSignal(Coop, ncclGinSignal_t signal, uint64_t least, int bits=64, ...) const;
+
+// Wait for signal to meet or exceed shadow value.
+template<typename Coop>
+void waitSignalMeetShadow(Coop, ncclGinSignal_t signal, int bits=64, ...) const;
+
+// Wait until signal exceeds shadow by leastDelta, updates shadow, returns before/delta.
+template<typename Coop, typename Uint>
+void waitSignalFollowShadow(Coop, ncclGinSignal_t signal, Uint leastDelta,
+  Uint* before, Uint* delta, int bits=64, ...) const;
+
+// Reset (sets to zero). May NOT race with concurrent modifications.
+void resetCounter(ncclGinCounter_t counter) const;
+void resetSignal(ncclGinSignal_t signal) const;
+```
+
+
+## nccl_device/core.h — Core types, teams, windows, ncclDevComm
+
+```cpp
+// Forward declarations
+struct ncclDevComm;
+struct ncclTeam;
+// ncclWindow_t is defined in nccl.h
+
+typedef uint32_t ncclGinSignal_t;
+typedef uint32_t ncclGinCounter_t;
+
+// ---- ncclTeam ----
+struct ncclTeam {
+  int nRanks, rank, stride;
+};
+
+// ---- ncclDevCommRequirements ----
+// Passed to ncclDevCommCreate to configure the device communicator.
+struct ncclDevCommRequirements {
+  ncclDevResourceRequirements_t* resourceRequirementsList;
+  ncclTeamRequirements_t* teamRequirementsList;
+
+  bool lsaMultimem;
+
+  int barrierCount;
+  int lsaBarrierCount;
+  int railGinBarrierCount;      // Typically 1
+
+  int lsaLLA2ABlockCount, lsaLLA2ASlotCount;
+
+  bool ginForceEnable;
+  int ginContextCount;          // Hint; typically 1
+  int ginSignalCount;           // Must be >= number of distinct signal indices used
+  int ginCounterCount;          // Must be >= number of distinct counter indices used
+};
+
+// Host-side create/destroy:
+ncclResult_t ncclDevCommCreate(ncclComm_t, ncclDevCommRequirements_t const*, ncclDevComm_t* outDevComm);
+ncclResult_t ncclDevCommDestroy(ncclComm_t, ncclDevComm_t const* devComm);
+
+// ---- Team API ----
+ncclTeam ncclTeamWorld(ncclDevComm const&);   // All ranks
+ncclTeam ncclTeamLsa(ncclDevComm const&);     // Local (NVLink) ranks
+ncclTeam ncclTeamRail(ncclDevComm const&);    // Network rail ranks
+
+int ncclTeamRankToWorld(ncclDevComm const&, ncclTeam, int rank);
+int ncclTeamRankToLsa(ncclDevComm const&, ncclTeam, int rank);
+bool ncclTeamRankIsMember(ncclTeam_t a, ncclTeam_t b, int bPeer);
+int ncclTeamRankToTeam(ncclTeam_t a, ncclTeam_t b, int bPeer);
+int ncclTeamRankInDifference(ncclTeam_t parent, ncclTeam_t subset, int index);
+ncclTeam_t ncclTeamInnerFactor(ncclTeam_t parent, int innerSize);
+ncclTeam_t ncclTeamOuterFactor(ncclTeam_t parent, int innerSize);
+
+// ---- Window API ----
+// Get local pointer into a registered window at byte offset:
+void* ncclGetLocalPointer(ncclWindow_t w, size_t offset);
+// Get peer's pointer (requires LSA connectivity):
+void* ncclGetPeerPointer(ncclWindow_t w, size_t offset, int peer);
+void* ncclGetPeerPointer(ncclWindow_t w, size_t offset, ncclTeam tm, int peer);
+// LSA peer pointer:
+void* ncclGetLsaPointer(ncclWindow_t w, size_t offset, int peer);
+```
+
+
+## nccl_device/coop.h — Cooperative group types
+
+```cpp
+// NCCL cooperative group types (used as Coop template parameters for GIN calls).
+// Each type provides: thread_rank(), size(), num_threads(), sync().
+
+// ncclCoopThread — single thread (default for put/waitSignal)
+typedef ncclCoopTile<1> ncclCoopThread;
+
+// ncclCoopWarp — full 32-thread warp
+typedef ncclCoopTile<32> ncclCoopWarp;
+
+// ncclCoopCta — entire CTA (threadblock)
+struct ncclCoopCta {
+  int thread_rank() const { return threadIdx.x; }
+  int size() const { return blockDim.x; }
+  void sync() { __syncthreads(); }
+};
+
+// ncclCoopTile<N> — aligned power-of-2 set of threads within a warp (N <= 32)
+template<int nThreadsPow2>
+struct ncclCoopTile {
+  int thread_rank() const;  // lane % nThreadsPow2
+  int size() const;         // nThreadsPow2
+  void sync();              // __syncwarp(laneMask)
+};
+
+// ncclCoopLanes — arbitrary subset of lanes in a warp
+struct ncclCoopLanes {
+  uint32_t lmask;
+  int thread_rank() const;  // popcount of lower lanes
+  int size() const;         // popcount(lmask)
+  void sync();              // __syncwarp(lmask)
+};
+
+// ncclCoopWarpSpan — consecutive warps with unique id [0..15]
+struct ncclCoopWarpSpan {
+  uint32_t warp0:8, nWarps:8, id:8;
+  int thread_rank() const;  // threadIdx.x - 32*warp0
+  int size() const;         // 32*nWarps
+  void sync();              // __barrier_sync_count(1+id, 32*nWarps)
+};
+
+// Helper: get active/coalesced lanes
+ncclCoopLanes ncclCoopCoalesced();  // __activemask()
+
+// IMPORTANT usage notes:
+// - flush(Coop): Coop must match the threads that issued puts.
+//   If only one thread issued puts, use ncclCoopThread, NOT ncclCoopCta.
+// - waitSignal(Coop, ...): ncclCoopThread is safest; ncclCoopCta can deadlock
+//   if not all CTA threads reach the wait.
+```
+
+
+## nccl_device/ptr.h — Symmetric pointer type
+
+```cpp
+// ncclSymPtr<T>: a window + byte offset pair for type-safe symmetric addressing.
+// Can be used with the ncclSymPtr variant of gin.put().
+template<typename T>
+struct ncclSymPtr {
+  ncclWindow_t window;
+  size_t offset;
+
+  ncclSymPtr(ncclWindow_t window = nullptr, size_t offset = 0);
+
+  // Arithmetic
+  ncclSymPtr<T>& operator+=(int/unsigned/long/...);
+  ncclSymPtr<T>& operator-=(int/unsigned/long/...);
+
+  // Device-side pointer resolution
+  T* localPtr() const;          // Local pointer
+  T* lsaPtr(int peer) const;    // LSA peer pointer
+  T* peerPtr(int peer) const;   // Peer pointer
+  T* peerPtr(ncclTeam team, int peer) const;
+  T* multimemPtr(ncclMultimemHandle mmHandle) const;
+  T* lsaMultimemPtr(ncclDevComm const&) const;
+};
+```
+
+
+## nccl_device/gin_barrier.h — GIN barrier API
+
+```cpp
+// GIN fence levels
+enum class ncclGinFenceLevel {
+  Relaxed
+};
+
+// Host-side: create barrier requirement
+ncclResult_t ncclGinBarrierCreateRequirement(
+  ncclComm_t, ncclTeam_t, int nBarriers,
+  ncclGinBarrierHandle_t* outHandle,
+  ncclDevResourceRequirements_t* outReq);
+
+// Device-side barrier session
+template<typename Coop>
+struct ncclGinBarrierSession {
+  // Constructors
+  ncclGinBarrierSession(Coop, ncclGin, ncclTeam, ncclGinBarrierHandle, uint32_t index);
+  ncclGinBarrierSession(Coop, ncclGin, ncclTeamTagRail, uint32_t index);
+
+  // Not copyable
+  ncclGinBarrierSession(ncclGinBarrierSession const&) = delete;
+
+  // Synchronize all team members
+  void sync(Coop, cuda::memory_order, ncclGinFenceLevel);
+};
+```
+
+
+## nccl_device/barrier.h — Combined LSA+GIN barrier API
+
+```cpp
+// ncclBarrierSession combines LSA and GIN barriers into a single session.
+// Use this when you need to synchronize across both LSA and GIN peers
+// (e.g., world-team barrier spanning local NVLink + remote network).
+
+template<typename Coop>
+struct ncclBarrierSession {
+  // Full featured constructor:
+  ncclBarrierSession(Coop, ncclTeam innerTeam, ncclTeam outerTeam, ncclGin,
+    ncclLsaBarrierHandle innerBarHandle,
+    ncclGinBarrierHandle outerBarHandle,
+    uint32_t index,
+    bool multimem = false, ncclMultimemHandle innerMmHandle = {});
+
+  // Convenience constructors for baked-in teams:
+  ncclBarrierSession(Coop, ncclTeamTagWorld, ncclGin, uint32_t index, bool multimem = false);
+  ncclBarrierSession(Coop, ncclTeamTagLsa, ncclDevComm const&, uint32_t index, bool multimem = false);
+  ncclBarrierSession(Coop, ncclTeamTagRail, ncclGin, uint32_t index);
+
+  ncclBarrierSession(ncclBarrierSession const&) = delete;  // Not copyable
+
+  // Access sub-barriers
+  ncclLsaBarrierSession<Coop>& lsaBarrier();
+  ncclGinBarrierSession<Coop>& ginBarrier();
+
+  // Synchronize all team members (both LSA and GIN)
+  void sync(Coop, cuda::memory_order, ncclGinFenceLevel);
+};
+```

@@ -1,0 +1,20 @@
+{
+  "combined_score": 83.8695216690538,
+  "public": {
+    "time_ms": 118.232825,
+    "max_time_ms": 141.6243,
+    "rank0_time_ms": 141.6243,
+    "rank0_tokens": 6144,
+    "rank1_time_ms": 48.0584,
+    "rank1_tokens": 2048,
+    "build_duration_sec": 6.735814856830984,
+    "all_run_times_ms": [
+      118.25765000000001,
+      118.232825
+    ]
+  },
+  "private": {
+    "stdout_excerpt": "DeepSeek-V3 MoE SPARSE Config (GIN sequential):\n  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}\n  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens\n  ranks=2, hidden=7168, intermediate=2048\n  GEMM1: [tokens, 7168] x [7168, 4096]  GEMM2: [tokens, 2048] x [2048, 7168]\nPhase: dispatch_put = 0.0655 ms\nPhase: dispatch_selfcopy = 0.0481 ms\nPhase: dispatch_wait = 1.9261 ms\nPhase: self_compute = 22.4819 ms\nPhase: remote_compute = 22.4778 ms\nPhase: combine_put = 0.0205 ms\nPhase: combine_selfcopy = 0.0543 ms\nPhase: combine_wait = 2.9164 ms\nPhase: dispatch_put = 0.0645 ms\nPhase: dispatch_selfcopy = 0.1044 ms\nPhase: dispatch_wait = 0.7342 ms\nPhase: self_compute = 67.0761 ms\nPhase: remote_compute = 67.0618 ms\nPhase: combine_put = 0.0236 ms\nPhase: combine_selfcopy = 0.1300 ms\nPhase: combine_wait = 7.2376 ms\n\n--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---\nTime: 141.6243 ms\nVerification: PASS (max error: 0.001410)\n\n--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---\nTime: 48.0584 ms\n"
+  },
+  "text_feedback": "Kernel time (token-weighted): 118.2328 ms. Lower is better. Combined score: 83.87.\nPer-rank: Rank0=141.6243 ms (6144 tokens), Rank1=48.0584 ms (2048 tokens). Max=141.6243 ms.\nRun times: 118.2577, 118.2328 ms (spread: 0.0248 ms, 0.0%). Using best: 118.2328 ms.\nREGRESSION. Best so far: 83.88 (yours: 83.87, 0.0% worse). Try smaller incremental changes.\n\nPer-phase timings:\n  dispatch_put: 0.0655 ms\n  dispatch_selfcopy: 0.0481 ms\n  dispatch_wait: 1.9261 ms\n  self_compute: 22.4819 ms\n  remote_compute: 22.4778 ms\n  combine_put: 0.0205 ms\n  combine_selfcopy: 0.0543 ms\n  combine_wait: 2.9164 ms\n  dispatch_put: 0.0645 ms\n  dispatch_selfcopy: 0.1044 ms\n  dispatch_wait: 0.7342 ms\n  self_compute: 67.0761 ms\n  remote_compute: 67.0618 ms\n  combine_put: 0.0236 ms\n  combine_selfcopy: 0.1300 ms\n  combine_wait: 7.2376 ms\n\nLLM Suggestions:\n## Analysis\n\n**Current Strategy**: Sequential pipeline with split PUT/WAIT kernels. Communication and compute are serialized \u2014 no overlap.\n\n**Biggest Bottleneck**: The critical path is dominated by **compute phases** (self_compute + remote_compute \u2248 89.5ms for expert 0, 44.9ms for expert 1), which run sequentially after dispatch_wait completes. The combine_wait phases (2.9ms + 7.2ms) also add latency but are secondary.\n\n**Key Observation**: The program issues PUT, then WAIT, then does ALL compute. This means ~10ms of communication wait time (dispatch_wait + combine_wait) is completely serialized with ~90ms of compute.\n\n## Suggestions\n\n1. **Overlap dispatch_wait with self_compute**: Launch self_compute on a separate stream immediately after dispatch_put. The self-copy data is already local \u2014 no need to wait for remote data. Use `cudaStreamWaitEvent` to synchronize only remote_compute with dispatch_wait completion. This hides ~2ms of dispatch_wait behind self_compute.\n\n2. **Pipeline combine_put with remote_compute completion**: Instead of waiting for all compute to finish before combine_put, issue combine_put for self-computed results as soon as self_compute finishes (on a separate stream). This overlaps combine communication with remote_compute, potentially hiding the 7.2ms combine_wait.\n\n3. **Fuse PUT and WAIT into compute kernel**: For maximum overlap, embed GIN put/wait calls directly into the compute kernels using warp specialization \u2014 dedicate 1 warp to communication while remaining warps compute. This eliminates kernel launch overhead and enables fine-grained tile-level pipelining."
+}

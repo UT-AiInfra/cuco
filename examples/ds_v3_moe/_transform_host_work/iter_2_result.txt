@@ -1,0 +1,38 @@
+=== Iteration 2 ===
+System Prompt: B
+Build: OK
+Run: OK
+
+--- Run Output ---
+DeepSeek-V3 MoE SPARSE Config (GIN AlltoAll):
+  Routing: each rank sends {3072, 1024} tokens to {expert0, expert1}
+  Expert 0 receives 6144 tokens, Expert 1 receives 2048 tokens
+  Padded chunk: 3072 tokens, hidden=7168, ranks=2
+  Dispatch AlltoAll: 21.0 MB int8/direction (padded)
+  Combine  AlltoAll: 84.0 MB float32/direction (padded)
+
+--- RESULTS (Rank 0: Expert 0, receives 6144 tokens) ---
+Time: 198.2382 ms
+  Dispatch GIN AlltoAll (padded):  5.3115 ms
+  Expert compute:                  173.4892 ms  (6144 tokens)
+  Combine GIN AlltoAll (padded):   19.4345 ms
+  Total Compute: 173.4892 ms
+  Total Comm:    24.7460 ms
+Verification: PASS (simplified for sparse routing)
+
+--- RESULTS (Rank 1: Expert 1, receives 2048 tokens) ---
+Time: 198.2372 ms
+  Dispatch GIN AlltoAll (padded):  5.3105 ms
+  Expert compute:                  45.0406 ms  (2048 tokens)
+  Combine GIN AlltoAll (padded):   147.8830 ms
+  Total Compute: 45.0406 ms
+  Total Comm:    153.1935 ms
+
+[mew3:126715] PMIX ERROR: NO-PERMISSIONS in file ../../../../../../src/mca/common/dstore/dstore_base.c at line 238
+[mew3:126715] PMIX ERROR: NO-PERMISSIONS in file ../../../../../../src/mca/common/dstore/dstore_base.c at line 238
+
+Verification: PASS
+Time: 198.2382 ms
+Host-side comms remaining: False
+
+Duration: 106.3s

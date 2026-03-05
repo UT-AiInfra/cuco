@@ -1,0 +1,215 @@
+<NAME>
+overlap_self_compute_with_dispatch_wait
+</NAME>
+
+<DESCRIPTION>
+The current program has a critical bottleneck: the compute stream waits for dispatch_wait_done before starting ANY compute, even though self-data is already available after self-copy completes.
+
+Looking at the timing:
+- Rank 0: dispatch_wait takes 0.7ms, then compute takes ~134ms
+- Rank 1: dispatch_wait takes 1.9ms, then compute takes ~45ms, then combine_wait takes 95.7ms
+
+The key insight is that self-data (from self-copy) doesn't need to wait for remote data to arrive. We can:
+1. Start self-compute immediately after self-copy completes (on compute_stream)
+2. Only wait for dispatch_wait_done before processing remote data
+
+This allows self-compute (~67ms for Rank 0's 3072 self-tokens) to overlap with the network transfer, potentially hiding the dispatch latency entirely.
+
+The change restructures the pipeline to:
+1. Issue dispatch PUT on comm_stream
+2. Do self-copy on compute_stream
+3. Immediately start self-compute (dequant→gemm1→swiglu→gemm2) for self-data on compute_stream
+4. Meanwhile, comm_stream waits for remote data
+5. After self-compute, compute_stream waits for dispatch_wait_done, then processes remote data
+6. This allows self-compute to overlap with network transfer
+</DESCRIPTION>
+
+<DIFF>
+<<<<<<< SEARCH
+    // === OVERLAPPED PIPELINE ===
+
+    // STEP 1a: Issue dispatch PUT on comm_stream (initiates transfers)
+    ginPutInt8Kernel<<<GIN_BLOCKS, GIN_THREADS, 0, comm_stream>>>(
+        devComm,
+        quant_send_win, quant_recv_win,
+        d_dispatch_send_bytes, d_dispatch_send_offsets, d_dispatch_recv_offsets,
+        0);  // signal index 0 for dispatch
+
+    // STEP 1b: Self-copy on compute_stream (can overlap with remote transfers)
+    int self_copy_blocks = (dispatch_self_elems + 255) / 256;
+    selfCopyInt8Kernel<<<self_copy_blocks, 256, 0, compute_stream>>>(
+        d_quant_recv, d_quant_send, dispatch_self_elems, dispatch_self_offset);
+
+    CUDA_CHECK(cudaEventRecord(dispatch_put_done, comm_stream));
+
+    // STEP 1c: Wait for dispatch transfers to complete
+    ginWaitInt8Kernel<<<GIN_BLOCKS, GIN_THREADS, 0, comm_stream>>>(
+        devComm, 0);
+    CUDA_CHECK(cudaEventRecord(dispatch_wait_done, comm_stream));
+
+    // Compute stream waits for dispatch to complete before processing
+    CUDA_CHECK(cudaStreamWaitEvent(compute_stream, dispatch_wait_done, 0));
+
+    // STEP 2: Dequantize received tokens int8 → float32
+    for (int src = 0; src < nranks; src++) {
+        int tokens = recv_counts[src];
+        if (tokens == 0) continue;
+        size_t recv_off = (size_t)src * max_chunk_elems;
+        dim3 qblk(16, 16);
+        dim3 qgrd((HIDDEN_DIM + 15) / 16, (tokens + 15) / 16);
+        dequantizeBlockScale<<<qgrd, qblk, 0, compute_stream>>>(
+            d_quant_recv + recv_off,
+            d_deq_float + recv_off,
+            d_scales, tokens, HIDDEN_DIM);
+    }
+
+    // STEP 3: GEMM1 per source chunk
+    for (int src = 0; src < nranks; src++) {
+        int tokens = recv_counts[src];
+        if (tokens == 0) continue;
+        size_t elem_off = (size_t)src * max_chunk_elems;
+        size_t tok_off = (size_t)src * max_chunk_tokens;
+        dim3 g1blk(TILE, TILE);
+        dim3 g1grd((GEMM1_OUT_DIM + TILE - 1) / TILE, (tokens + TILE - 1) / TILE);
+        tiledMatmul<<<g1grd, g1blk, 0, compute_stream>>>(
+            d_deq_float + elem_off, d_W1,
+            d_gemm1_out + tok_off * GEMM1_OUT_DIM,
+            tokens, GEMM1_OUT_DIM, HIDDEN_DIM);
+    }
+
+    // STEP 4: SwiGLU per source chunk
+    for (int src = 0; src < nranks; src++) {
+        int tokens = recv_counts[src];
+        if (tokens == 0) continue;
+        size_t tok_off = (size_t)src * max_chunk_tokens;
+        dim3 sblk(16, 16);
+        dim3 sgrd((INTERMEDIATE_DIM + 15) / 16, (tokens + 15) / 16);
+        swiGLU<<<sgrd, sblk, 0, compute_stream>>>(
+            d_gemm1_out + tok_off * GEMM1_OUT_DIM,
+            d_swiglu_out + tok_off * INTERMEDIATE_DIM,
+            tokens, INTERMEDIATE_DIM);
+    }
+
+    // STEP 5: GEMM2 per source chunk
+    for (int src = 0; src < nranks; src++) {
+        int tokens = recv_counts[src];
+        if (tokens == 0) continue;
+        size_t tok_off = (size_t)src * max_chunk_tokens;
+        size_t elem_off = (size_t)src * max_chunk_elems;
+        dim3 g2blk(TILE, TILE);
+        dim3 g2grd((HIDDEN_DIM + TILE - 1) / TILE, (tokens + TILE - 1) / TILE);
+        tiledMatmul<<<g2grd, g2blk, 0, compute_stream>>>(
+            d_swiglu_out + tok_off * INTERMEDIATE_DIM, d_W2,
+            d_expert_output + elem_off,
+            tokens, HIDDEN_DIM, INTERMEDIATE_DIM);
+    }
+=======
+    // === OVERLAPPED PIPELINE ===
+
+    // STEP 1a: Issue dispatch PUT on comm_stream (initiates transfers)
+    ginPutInt8Kernel<<<GIN_BLOCKS, GIN_THREADS, 0, comm_stream>>>(
+        devComm,
+        quant_send_win, quant_recv_win,
+        d_dispatch_send_bytes, d_dispatch_send_offsets, d_dispatch_recv_offsets,
+        0);  // signal index 0 for dispatch
+
+    // STEP 1b: Self-copy on compute_stream (can overlap with remote transfers)
+    int self_copy_blocks = (dispatch_self_elems + 255) / 256;
+    selfCopyInt8Kernel<<<self_copy_blocks, 256, 0, compute_stream>>>(
+        d_quant_recv, d_quant_send, dispatch_self_elems, dispatch_self_offset);
+
+    CUDA_CHECK(cudaEventRecord(dispatch_put_done, comm_stream));
+
+    // STEP 1c: Wait for dispatch transfers to complete (on comm_stream)
+    ginWaitInt8Kernel<<<GIN_BLOCKS, GIN_THREADS, 0, comm_stream>>>(
+        devComm, 0);
+    CUDA_CHECK(cudaEventRecord(dispatch_wait_done, comm_stream));
+
+    // STEP 2: Process SELF data immediately (doesn't need remote data)
+    // Self-compute overlaps with network transfer!
+    {
+        int tokens = recv_counts[rank];
+        if (tokens > 0) {
+            size_t recv_off = (size_t)rank * max_chunk_elems;
+            size_t tok_off = (size_t)rank * max_chunk_tokens;
+
+            // Dequantize self data
+            dim3 qblk(16, 16);
+            dim3 qgrd((HIDDEN_DIM + 15) / 16, (tokens + 15) / 16);
+            dequantizeBlockScale<<<qgrd, qblk, 0, compute_stream>>>(
+                d_quant_recv + recv_off,
+                d_deq_float + recv_off,
+                d_scales, tokens, HIDDEN_DIM);
+
+            // GEMM1 for self data
+            dim3 g1blk(TILE, TILE);
+            dim3 g1grd((GEMM1_OUT_DIM + TILE - 1) / TILE, (tokens + TILE - 1) / TILE);
+            tiledMatmul<<<g1grd, g1blk, 0, compute_stream>>>(
+                d_deq_float + recv_off, d_W1,
+                d_gemm1_out + tok_off * GEMM1_OUT_DIM,
+                tokens, GEMM1_OUT_DIM, HIDDEN_DIM);
+
+            // SwiGLU for self data
+            dim3 sblk(16, 16);
+            dim3 sgrd((INTERMEDIATE_DIM + 15) / 16, (tokens + 15) / 16);
+            swiGLU<<<sgrd, sblk, 0, compute_stream>>>(
+                d_gemm1_out + tok_off * GEMM1_OUT_DIM,
+                d_swiglu_out + tok_off * INTERMEDIATE_DIM,
+                tokens, INTERMEDIATE_DIM);
+
+            // GEMM2 for self data
+            dim3 g2blk(TILE, TILE);
+            dim3 g2grd((HIDDEN_DIM + TILE - 1) / TILE, (tokens + TILE - 1) / TILE);
+            tiledMatmul<<<g2grd, g2blk, 0, compute_stream>>>(
+                d_swiglu_out + tok_off * INTERMEDIATE_DIM, d_W2,
+                d_expert_output + recv_off,
+                tokens, HIDDEN_DIM, INTERMEDIATE_DIM);
+        }
+    }
+
+    // STEP 3: Now wait for remote data before processing it
+    CUDA_CHECK(cudaStreamWaitEvent(compute_stream, dispatch_wait_done, 0));
+
+    // STEP 4: Process REMOTE data (from other rank)
+    int remote_rank = 1 - rank;
+    {
+        int tokens = recv_counts[remote_rank];
+        if (tokens > 0) {
+            size_t recv_off = (size_t)remote_rank * max_chunk_elems;
+            size_t tok_off = (size_t)remote_rank * max_chunk_tokens;
+
+            // Dequantize remote data
+            dim3 qblk(16, 16);
+            dim3 qgrd((HIDDEN_DIM + 15) / 16, (tokens + 15) / 16);
+            dequantizeBlockScale<<<qgrd, qblk, 0, compute_stream>>>(
+                d_quant_recv + recv_off,
+                d_deq_float + recv_off,
+                d_scales, tokens, HIDDEN_DIM);
+
+            // GEMM1 for remote data
+            dim3 g1blk(TILE, TILE);
+            dim3 g1grd((GEMM1_OUT_DIM + TILE - 1) / TILE, (tokens + TILE - 1) / TILE);
+            tiledMatmul<<<g1grd, g1blk, 0, compute_stream>>>(
+                d_deq_float + recv_off, d_W1,
+                d_gemm1_out + tok_off * GEMM1_OUT_DIM,
+                tokens, GEMM1_OUT_DIM, HIDDEN_DIM);
+
+            // SwiGLU for remote data
+            dim3 sblk(16, 16);
+            dim3 sgrd((INTERMEDIATE_DIM + 15) / 16, (tokens + 15) / 16);
+            swiGLU<<<sgrd, sblk, 0, compute_stream>>>(
+                d_gemm1_out + tok_off * GEMM1_OUT_DIM,
+                d_swiglu_out + tok_off * INTERMEDIATE_DIM,
+                tokens, INTERMEDIATE_DIM);
+
+            // GEMM2 for remote data
+            dim3 g2blk(TILE, TILE);
+            dim3 g2grd((HIDDEN_DIM + TILE - 1) / TILE, (tokens + TILE - 1) / TILE);
+            tiledMatmul<<<g2grd, g2blk, 0, compute_stream>>>(
+                d_swiglu_out + tok_off * INTERMEDIATE_DIM, d_W2,
+                d_expert_output + recv_off,
+                tokens, HIDDEN_DIM, INTERMEDIATE_DIM);
+        }
+    }
+>>>>>>> REPLACE
+</DIFF>
