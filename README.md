@@ -119,6 +119,7 @@ cuco_visualize --db examples/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite
 @article{hu2026cuco,
   title={CUCo: An Agentic Framework for Compute and Communication Co-design},
   author={Hu, Bodun and Varadharajan, Yoga Sri Varshan and Agarwal, Saurabh and Akella, Aditya},
+  note={Equal contribution: Bodun Hu and Yoga Sri Varshan V},
   journal={arXiv preprint arXiv:2603.02376},
   year={2026}
 }
@@ -126,4 +127,4 @@ cuco_visualize --db examples/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite
 
 ## License
 
-MIT
+Apache 2.0
