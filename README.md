@@ -4,7 +4,7 @@
 
 # CUCo: An Agentic Framework for Compute and Communication Co-design
 
-**[Paper](https://arxiv.org/abs/2603.02376)**
+[![arXiv](https://img.shields.io/badge/arXiv-2603.02376-b31b1b.svg)](https://arxiv.org/abs/2603.02376) [![Website](https://img.shields.io/badge/Website-ut--aiinfra.github.io/cuco-blue.svg)](https://ut-aiinfra.github.io/cuco/) [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
 CUCo is a training-free, agent-driven framework that automatically generates high-performance CUDA kernels jointly orchestrating computation and communication. By co-optimizing these traditionally disjoint components, CUCo unlocks optimization opportunities unavailable to existing approaches, reducing end-to-end latency by up to 1.57x over host-driven baselines.
 
@@ -203,6 +203,7 @@ cuco_visualize --db examples/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite
 @article{hu2026cuco,
   title={CUCo: An Agentic Framework for Compute and Communication Co-design},
   author={Hu, Bodun and Varadharajan, Yoga Sri Varshan and Agarwal, Saurabh and Akella, Aditya},
+  note={Equal contribution: Bodun Hu and Yoga Sri Varshan V},
   journal={arXiv preprint arXiv:2603.02376},
   year={2026}
 }
@@ -210,4 +211,4 @@ cuco_visualize --db examples/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite
 
 ## License
 
-MIT
+Apache 2.0
