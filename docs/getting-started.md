@@ -29,7 +29,7 @@ CUCo requires access to at least one LLM provider. The default configuration use
 ### Clone and install
 
 ```bash
-git clone https://github.com/UT-AiInfra/cuco.git
+git clone https://github.com/UT-InfraAI/cuco.git
 cd cuco
 
 python3 -m venv .venv

@@ -138,7 +138,7 @@ uv.lock                 Locked dependency versions
 
 ```bash
 # Clone the repository
-git clone https://github.com/UT-AiInfra/cuco.git
+git clone https://github.com/UT-InfraAI/cuco.git
 cd cuco
 
 # Create virtual environment and install
