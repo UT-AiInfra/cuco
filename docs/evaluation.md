@@ -380,7 +380,7 @@ This is typically called in `run_evo.py` and included in the task system message
 
 ## Reference Implementation
 
-See `examples/ds_v3_moe/evaluate.py` for a complete, production-quality evaluation script that includes:
+See `workloads/ds_v3_moe/evaluate.py` for a complete, production-quality evaluation script that includes:
 - LLM-based code instrumentation (per-phase timers)
 - API detection (GIN / LSA / host NCCL)
 - LLM feedback with API-specific context

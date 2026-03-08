@@ -49,10 +49,11 @@ dependencies = [
     "markdown",
     "aiofiles",
     "google-generativeai",
+    "pyyaml",
 ]
 
 [tool.setuptools]
-script-files = ["cuco/cuco_launch", "cuco/cuco_visualize"]
+script-files = ["cuco/cuco_launch", "cuco/cuco_visualize", "cuco/cuco_init", "cuco/cuco_run"]
 
 [tool.setuptools.packages.find]
 include = ["cuco", "cuco.*"]

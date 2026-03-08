@@ -12,7 +12,7 @@ CUCo provides an interactive web UI and programmatic plotting utilities for expl
 
 ```bash
 # Open a specific database
-cuco_visualize --db examples/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite --open
+cuco_visualize --db workloads/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite --open
 
 # Browse all databases under a directory
 cuco_visualize /path/to/results --open

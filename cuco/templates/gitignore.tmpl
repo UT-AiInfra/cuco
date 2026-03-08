@@ -1,0 +1,18 @@
+# Compiled binaries
+build/{{WORKLOAD_NAME}}
+build/{{WORKLOAD_NAME}}_*
+_transform_host_output/{{WORKLOAD_NAME}}_test
+_transform_host_work/cuda_program
+results_{{WORKLOAD_NAME}}/**/{{WORKLOAD_NAME}}
+
+# Python cache
+__pycache__/
+*.pyc
+
+# SQLite WAL files
+*.sqlite-shm
+*.sqlite-wal
+
+# Build artifacts
+*.o
+*.so

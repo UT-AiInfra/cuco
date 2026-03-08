@@ -71,7 +71,7 @@ NCCL_STATIC_LIB = "/usr/local/nccl_2.28.9-1+cuda13.0_x86_64/lib/libnccl_static.a
 
 ### Configure multi-node (if applicable)
 
-For inter-node experiments, create a hostfile at `examples/ds_v3_moe/build/hostfile`:
+For inter-node experiments, create a hostfile at `workloads/ds_v3_moe/build/hostfile`:
 
 ```
 node1 slots=1
@@ -87,7 +87,7 @@ The included example is a DeepSeek-V3 MoE (Mixture of Experts) dispatch-compute-
 If starting from a host-driven NCCL program, the fast-path agent converts it to device-initiated GIN:
 
 ```bash
-cd examples/ds_v3_moe
+cd workloads/ds_v3_moe
 python run_transform.py
 ```
 
@@ -108,7 +108,7 @@ This runs the three-step pipeline (analyze, host-to-device, evolve-block annotat
 Run the slow-path agent to optimize the kernel:
 
 ```bash
-cd examples/ds_v3_moe
+cd workloads/ds_v3_moe
 python run_evo.py --num_generations=18 --api=gin
 ```
 
@@ -145,7 +145,7 @@ Results are saved to `results_ds_v3_moe/` as they complete.
 Launch the interactive web UI:
 
 ```bash
-cuco_visualize --db examples/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite --open
+cuco_visualize --db workloads/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite --open
 ```
 
 This opens a browser with:

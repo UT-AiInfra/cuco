@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--results_dir",
     type=str,
-    default="examples/agent_design/results_20250620_133347",
+    default="workloads/agent_design/results_20250620_133347",
 )
 args = parser.parse_args()
 

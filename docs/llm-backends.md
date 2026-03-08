@@ -73,7 +73,7 @@ llm_models=["claude-haiku-4-5"]
 
 ## Anthropic via AWS Bedrock (recommended)
 
-This is the default provider in the included examples.
+This is the default provider in the included workloads.
 
 ### Environment Variables
 

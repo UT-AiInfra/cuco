@@ -1,48 +1,59 @@
 # Adding a New Workload
 
-This guide walks through every step needed to adapt CUCo for a new CUDA kernel, using the included DeepSeek-V3 MoE example (`examples/ds_v3_moe/`) as a reusable template.
+This guide walks through setting up a new CUDA kernel for optimization with CUCo.
 
 ## Quick Start
 
-The `ds_v3_moe` example is designed to be copied and reused without editing Python files. The workload-specific values (kernel filename, results directory) are all passed as CLI arguments.
+Three commands to go from seed kernel to running evolution:
 
 ```bash
-# 1. Copy the template
-cp -r examples/ds_v3_moe examples/my_workload
+# 1. One-time cluster setup (auto-detects CUDA, NCCL, MPI, GPU)
+cuco_init --setup
 
-# 2. Add your seed kernel
-cp /path/to/my_kernel.cu examples/my_workload/
+# 2. Scaffold a new workload from your seed kernel
+cuco_init /path/to/my_kernel.cu
 
 # 3. Run evolution
-cd examples/my_workload
-python run_evo.py \
-    --init_program my_kernel.cu \
-    --results_dir results_my_workload \
-    --num_generations 18
-
-# Or run the host-to-device transformation
-python run_transform.py --source my_kernel.cu
+cuco_run my_kernel --generations 50
 ```
 
-Before this works, you need to ensure your seed kernel and environment are compatible (see the steps below).
+`cuco_init` creates a ready-to-run workload directory with all required files, auto-detects your cluster environment, validates the seed file, and prints the exact run command. See `cuco_init --help` for all options.
+
+### What `cuco_init` does
+
+- Creates `workloads/<name>/` with your seed file
+- Generates `evaluate.py` pre-configured with your cluster's CUDA/NCCL/MPI paths (from `~/.cuco/site.yaml`)
+- Copies `run_evo.py`, `run_transform.py`, `nccl_api_docs.py` with correct defaults
+- Generates `.gitignore`
+- Validates that your seed prints `Time: X.XXXX ms` and `Verification: PASS`
+- Prints a review checklist and the exact run command
+
+### Manual setup (alternative)
+
+If you prefer not to use `cuco_init`, you can copy and customize directly:
+
+```bash
+cp -r workloads/ds_v3_moe workloads/my_workload
+cp /path/to/my_kernel.cu workloads/my_workload/
+cd workloads/my_workload
+python run_evo.py --init_program my_kernel.cu --results_dir results_my_workload --num_generations 18
+```
 
 ## Overview
 
 A CUCo workload directory contains:
 
 ```
-examples/my_workload/
+workloads/my_workload/
 ├── my_kernel.cu          # Seed CUDA kernel (host-driven or device-initiated)
 ├── evaluate.py           # Build, run, correctness check, fitness scoring
 ├── run_evo.py            # Evolution launcher with prompt customization
 ├── run_transform.py      # Fast-path transformation launcher (optional)
 ├── nccl_api_docs.py      # API documentation / reference material for LLM context
-├── .gitignore            # Excludes build artifacts, results, __pycache__
-└── build/
-    └── hostfile          # MPI hostfile (only needed for multi-node runs)
+└── .gitignore            # Excludes build artifacts, results, __pycache__
 ```
 
-When copying from `ds_v3_moe`, all of these files come with the directory. You only need to add your `.cu` seed kernel.
+When using `cuco_init`, all of these files are generated automatically. When copying from `ds_v3_moe`, they come with the directory.
 
 ## Step 1: Prepare the Seed Kernel
 
@@ -141,7 +152,7 @@ int main(int argc, char** argv) {
 
 The purpose of this file is to supply the LLM with all the reference material it needs — API documentation, usage examples, header snippets, or any other context — so it can generate correct code for APIs or libraries that may be poorly represented in its training data. The file name is arbitrary (e.g., `nccl_api_docs.py`, `cuda_graph_docs.py`, `my_lib_reference.py`); what matters is that your `run_evo.py` imports the variables and injects them into the prompt.
 
-The included `examples/ds_v3_moe/nccl_api_docs.py` is one such file, providing NCCL device-initiated API documentation. It exports these variables:
+The included `workloads/ds_v3_moe/nccl_api_docs.py` is one such file, providing NCCL device-initiated API documentation. It exports these variables:
 
 <table>
   <tr>
@@ -198,25 +209,13 @@ The source and binary filenames are derived automatically from `--program_path` 
 
 ### Build Toolchain Paths
 
-If your CUDA, NCCL, or MPI installations are in different locations, update these constants at the top of `evaluate.py`:
+When using `cuco_init`, the generated `evaluate.py` imports all cluster-specific paths from `cuco.site_config`, which reads from `~/.cuco/site.yaml` (auto-detected during `cuco_init --setup`). You do not need to edit any paths manually.
 
-```python
-NVCC = "/usr/local/cuda-13.1/bin/nvcc"
-NCCL_INCLUDE = "/usr/local/nccl_2.28.9-1+cuda13.0_x86_64/include"
-NCCL_STATIC_LIB = "/usr/local/nccl_2.28.9-1+cuda13.0_x86_64/lib/libnccl_static.a"
-CUDA_LIB64 = "/usr/local/cuda-13.1/lib64"
-MPI_INCLUDE = "/usr/lib/x86_64-linux-gnu/openmpi/include"
-MPI_INCLUDE_OPENMPI = "/usr/lib/x86_64-linux-gnu/openmpi/include/openmpi"
-MPI_LIB = "/usr/lib/x86_64-linux-gnu/openmpi/lib"
-```
+To change cluster settings (e.g., when moving to a different machine), either:
+- Re-run `cuco_init --setup`, or
+- Edit `~/.cuco/site.yaml` directly
 
-Also update the `-arch` flag in `get_build_command` to match your GPU architecture:
-
-| Flag | GPU |
-|---|---|
-| `-arch=sm_80` | A100 (Ampere) |
-| `-arch=sm_90` | H100 (Hopper) |
-| `-arch=sm_100` | B200 (Blackwell) |
+If using the manual setup (copied from `ds_v3_moe`), the original `evaluate.py` has hardcoded paths that you'll need to update.
 
 Key build flags:
 - `-rdc=true` — Required for device-side NCCL (relocatable device code)
@@ -232,45 +231,25 @@ MPI_NP = 2
 
 ### Network and Topology
 
-The `_run_binary` function in `evaluate.py` constructs the `mpirun` command. The defaults are configured for **inter-node InfiniBand** across two servers:
+When using `cuco_init`, the generated `evaluate.py` uses `build_mpirun_cmd()` from `cuco.site_config`, which constructs the `mpirun` command dynamically based on `~/.cuco/site.yaml`:
 
-```python
-"mpirun", "--hostfile", HOSTFILE,
-"-np", str(MPI_NP),
-"--map-by", "node",
-"-x", "NCCL_SOCKET_IFNAME=enp75s0f1np1",
-"-x", "NCCL_IB_HCA=mlx5_1",
-"-x", "NCCL_IB_GID_INDEX=3",
-"--mca", "btl_tcp_if_include", "enp75s0f1np1",
-"--mca", "oob_tcp_if_include", "enp75s0f1np1",
+- **Single-node** (default): Simple `mpirun -np N` with no hostfile or IB flags.
+- **Multi-node**: Includes `--hostfile`, NCCL network flags, and MCA TCP settings.
+
+To switch between single-node and multi-node, run `cuco_init --setup` and answer the multi-node prompt, or edit `~/.cuco/site.yaml` directly:
+
+```yaml
+multi_node: true
+hostfile: /path/to/hostfile
+network:
+  nccl_socket_ifname: enp75s0f1np1
+  nccl_ib_hca: mlx5_1
+  nccl_ib_gid_index: 3
+  btl_tcp_if_include: enp75s0f1np1
+  oob_tcp_if_include: enp75s0f1np1
 ```
 
-Adapt these for your setup:
-
-<table>
-  <tr>
-    <th>Setup</th>
-    <th>What to change</th>
-  </tr>
-  <tr>
-    <td><strong>Single-node</strong> (2 GPUs, same machine)</td>
-    <td>Remove <code>--hostfile</code>, <code>--map-by node</code>, and all <code>NCCL_SOCKET_IFNAME</code> / <code>NCCL_IB_*</code> / <code>--mca</code> flags. Just use <code>mpirun -np 2</code>. No <code>build/hostfile</code> needed.</td>
-  </tr>
-  <tr>
-    <td><strong>Different InfiniBand device</strong></td>
-    <td>Change <code>NCCL_IB_HCA</code> (e.g., <code>mlx5_0</code>) and <code>NCCL_IB_GID_INDEX</code>.</td>
-  </tr>
-  <tr>
-    <td><strong>Different network interface</strong></td>
-    <td>Change <code>NCCL_SOCKET_IFNAME</code> and the <code>--mca</code> interface names. Run <code>ip addr</code> to find your interface name.</td>
-  </tr>
-  <tr>
-    <td><strong>Different nodes</strong></td>
-    <td>Update <code>build/hostfile</code> with your node hostnames (e.g., <code>node1 slots=1</code>).</td>
-  </tr>
-</table>
-
-The same network settings appear in `run_transform.py` (in the `TransformConfig` and agent prompt). If you change them in `evaluate.py`, update `run_transform.py` to match.
+All workloads on the same cluster share this config — change it once, and all workloads pick up the new settings.
 
 ### Timing and Verification Patterns
 
@@ -513,7 +492,7 @@ Before running a full evolution, verify each component:
 ### 1. Verify the seed builds and runs
 
 ```bash
-cd examples/my_workload
+cd workloads/my_workload
 # Build
 nvcc -o my_kernel my_kernel.cu -I... -rdc=true -arch=sm_80 ...
 # Run (single-node)
@@ -544,17 +523,15 @@ Check `results_test/gen_0/` for the first generation's output.
 
 Before running a full evolution, verify:
 
+- [ ] `cuco_init --setup` has been run (or `~/.cuco/site.yaml` exists with correct paths)
 - [ ] Seed kernel compiles with your nvcc command
 - [ ] Seed kernel runs correctly via mpirun on your target GPUs
 - [ ] Seed kernel prints `Time: X.XXXX ms` (or you've updated `TIME_PATTERN`)
 - [ ] Seed kernel prints `Verification: PASS`
-- [ ] `evaluate.py` build paths match your CUDA/NCCL/MPI installation
-- [ ] `evaluate.py` network flags match your topology (or removed for single-node)
 - [ ] `evaluate.py` correctly parses timing and writes `metrics.json` / `correct.json`
 - [ ] EVOLVE-BLOCK markers are placed around mutable regions only
 - [ ] Frozen regions (init, main, verification) are outside EVOLVE-BLOCK
 - [ ] `.env` file has valid LLM API credentials
-- [ ] Hostfile is configured for your GPU topology (multi-node only)
 - [ ] `nccl_api_docs.py` is present and importable
 
 ## Common Pitfalls
@@ -575,4 +552,4 @@ Before running a full evolution, verify:
 
 8. **Static NCCL linking**: Device APIs require static linking (`libnccl_static.a`), not dynamic (`-lnccl`).
 
-9. **Single-node vs multi-node mismatch**: If running on a single node, make sure you've removed the `--hostfile`, `--map-by node`, and InfiniBand flags from `_run_binary` in `evaluate.py`. Leaving them in can cause `mpirun` failures or connection errors.
+9. **Single-node vs multi-node mismatch**: If running on a single node, make sure `~/.cuco/site.yaml` has `multi_node: false`. When using the manual setup (without `cuco_init`), remove the `--hostfile`, `--map-by node`, and InfiniBand flags from `_run_binary` in `evaluate.py`.

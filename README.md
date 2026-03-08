@@ -96,7 +96,7 @@ CUCo was evaluated on four representative workloads spanning different compute-c
 
 ## Extensibility
 
-While the included example uses CUDA and NCCL device APIs, CUCo's core framework is workload-agnostic. The evaluation script (`evaluate.py`), prompt customization (`run_evo.py`), and API documentation file are all user-defined — you can adapt CUCo for any kernel, library, or optimization target where an LLM can generate code and a script can score it. See [Adding a New Workload](docs/adding-a-workload.md) for details.
+While the included example uses CUDA and NCCL device APIs, CUCo's core framework is workload-agnostic. Run `cuco_init /path/to/kernel.cu` to scaffold a new workload with all required files pre-configured for your cluster. The evaluation script (`evaluate.py`), prompt customization (`run_evo.py`), and API documentation file are all user-defined — you can adapt CUCo for any kernel, library, or optimization target where an LLM can generate code and a script can score it. See [Adding a New Workload](docs/adding-a-workload.md) for details.
 
 ## Repository Layout
 
@@ -111,9 +111,15 @@ cuco/                   Core framework
 ├── plots/              Visualization utilities (lineage trees, pareto fronts, improvement plots)
 ├── webui/              Interactive evolution visualization UI
 ├── launch/             Local and Slurm launch backends
+├── templates/          Templates for evaluate.py, .gitignore (used by cuco_init)
+├── site_config.py      Cluster auto-detection and ~/.cuco/site.yaml management
+├── init_workload.py    Workload scaffolding logic (used by cuco_init)
+├── run_workload.py     Workload launcher logic (used by cuco_run)
+├── cuco_init           CLI: scaffold new workloads or run cluster setup
+├── cuco_run            CLI: launch evolution for a named workload
 ├── cuco_launch         Entry point for launching evolution runs
 └── cuco_visualize      Entry point for the visualization UI
-examples/
+workloads/
 └── ds_v3_moe/          DeepSeek-V3 MoE dispatch-compute-combine workload
     ├── ds_v3_moe.cu    Seed CUDA kernel (host-driven baseline)
     ├── evaluate.py     Build, run, and fitness evaluation logic
@@ -167,12 +173,29 @@ AWS_SECRET_ACCESS_KEY=...
 
 ## Usage
 
+### Quick Start: Add Your Own Workload
+
+CUCo provides `cuco_init` to scaffold a new workload from any seed CUDA kernel:
+
+```bash
+# One-time cluster setup (auto-detects CUDA, NCCL, MPI, GPUs)
+cuco_init --setup
+
+# Scaffold a new workload from your seed kernel
+cuco_init /path/to/my_kernel.cu
+
+# Run evolution (50 generations by default)
+cuco_run my_kernel --generations 50
+```
+
+`cuco_init` creates a ready-to-run workload directory under `workloads/` with all required files (`evaluate.py`, `run_evo.py`, `run_transform.py`, etc.) pre-configured using your cluster settings from `~/.cuco/site.yaml`. See [Adding a New Workload](docs/adding-a-workload.md) for details.
+
 ### Fast-Path Agent (Host-to-Device Transformation)
 
 The fast-path agent converts a host-driven NCCL program into a device-initiated equivalent:
 
 ```bash
-cd examples/ds_v3_moe
+cd workloads/ds_v3_moe
 python run_transform.py
 ```
 
@@ -183,7 +206,7 @@ This runs the three-step pipeline (CUDA analysis, host-to-device transformation,
 The slow-path agent optimizes the transformed kernel through LLM-driven evolution:
 
 ```bash
-cd examples/ds_v3_moe
+cd workloads/ds_v3_moe
 python run_evo.py --num_generations=18
 ```
 
@@ -194,7 +217,7 @@ Evolution results (candidate programs, scores, logs) are saved to `results_ds_v3
 Launch the interactive web UI to explore the evolution tree:
 
 ```bash
-cuco_visualize --db examples/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite
+cuco_visualize --db workloads/ds_v3_moe/results_ds_v3_moe/evolution_db.sqlite
 ```
 
 ## Citation

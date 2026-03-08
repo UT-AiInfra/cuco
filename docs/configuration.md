@@ -1028,4 +1028,4 @@ cuco_launch database=my_db evolution=my_evo
 
 This looks for `configs/database/my_db.yaml` and `configs/evolution/my_evo.yaml`. The YAML structure mirrors the dataclass fields.
 
-When using `run_evo.py` directly (as in the examples), configuration is assembled in Python — no YAML files needed. This is the recommended approach for workload-specific setups.
+When using `run_evo.py` directly (as in the workloads), configuration is assembled in Python — no YAML files needed. This is the recommended approach for workload-specific setups.
