@@ -5,6 +5,11 @@
 __pycache__/
 *.pyc
 *.pyo
+*.o
+*.so
+
+# Build artifacts (Cython generated .cpp, compiled .so, etc.)
+build/
 
 # Egg info
 *.egg-info/
