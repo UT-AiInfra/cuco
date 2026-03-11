@@ -16,7 +16,7 @@ LSA_SKIP_REASON = "LSA not available (deviceApiSupport=False or nLsaTeams=0)"
 # Kernel launch config — CTA count must equal lsaBarrierCount
 _CTA_COUNT = 4
 _THREADS_PER_CTA = 128
-_COUNT = 1024  # float32 elements per rank
+_COUNT = 1 << 20  # float32 elements per rank (~4 MB)
 
 # Full LSA allreduce kernel:
 #   - send/recv buffers are ncclMemAlloc symmetric memory registered as windows
@@ -211,45 +211,57 @@ def _lsa_worker(rank, cubin_bytes, results, skip_q):
         _cleanup_process_group(dist)
 
 
-def _dist_worker(rank):
+def _dist_worker(rank, results):
     import torch
 
     dist = _init_process_group(rank, ALLREDUCE_INIT_METHOD)
     try:
-        t = torch.tensor([float(rank + 1)], device=f"cuda:{rank}")
+        t = torch.full((_COUNT,), float(rank), device=f"cuda:{rank}")
         dist.all_reduce(t)
-        assert t.item() == 3.0, f"expected 3.0, got {t.item()}"
+        results[rank].copy_(t.cpu())
     finally:
         _cleanup_process_group(dist)
 
 
 def test_lsa_allreduce(lsa_cubin):
-    """Run LSA allreduce over 2 ranks and validate every output element."""
+    """Run LSA allreduce over 2 ranks; compare against dist.all_reduce baseline."""
     import torch
     import torch.multiprocessing as mp
 
     _require_lsa_dependencies()
     _require_2_gpus()
 
-    expected_val = float(sum(range(WORLD_SIZE)))  # 0+1 = 1.0 for 2 ranks
-    results = torch.zeros(WORLD_SIZE, _COUNT).share_memory_()
+    # --- LSA kernel results ---
+    lsa_results = torch.zeros(WORLD_SIZE, _COUNT).share_memory_()
     skip_q = mp.get_context("spawn").SimpleQueue()
-    mp.spawn(_lsa_worker, args=(lsa_cubin, results, skip_q), nprocs=WORLD_SIZE, join=True)
+    mp.spawn(_lsa_worker, args=(lsa_cubin, lsa_results, skip_q), nprocs=WORLD_SIZE, join=True)
 
     if not skip_q.empty():
         pytest.skip(skip_q.get())
 
-    expected = torch.full((_COUNT,), expected_val)
-    for rank, rank_result in enumerate(results):
-        assert rank_result.allclose(expected), (
-            f"rank {rank} recv wrong: expected {expected_val}, "
-            f"got {rank_result[:4].tolist()}..."
+    # --- dist.all_reduce baseline ---
+    dist_results = torch.zeros(WORLD_SIZE, _COUNT).share_memory_()
+    mp.spawn(_dist_worker, args=(dist_results,), nprocs=WORLD_SIZE, join=True)
+
+    for rank in range(WORLD_SIZE):
+        assert lsa_results[rank].allclose(dist_results[rank]), (
+            f"rank {rank}: LSA result differs from dist.all_reduce baseline; "
+            f"lsa[:4]={lsa_results[rank][:4].tolist()}, "
+            f"dist[:4]={dist_results[rank][:4].tolist()}"
         )
 
 
 def test_torch_dist_allreduce():
-    """Each rank contributes r+1; all-reduce sum across 2 ranks must be 3."""
+    """Smoke-test dist.all_reduce independently."""
+    import torch
     import torch.multiprocessing as mp
 
     _require_2_gpus()
-    mp.spawn(_dist_worker, nprocs=WORLD_SIZE, join=True)
+    results = torch.zeros(WORLD_SIZE, _COUNT).share_memory_()
+    mp.spawn(_dist_worker, args=(results,), nprocs=WORLD_SIZE, join=True)
+    expected_val = float(sum(range(WORLD_SIZE)))  # 0+1 = 1.0
+    expected = torch.full((_COUNT,), expected_val)
+    for rank in range(WORLD_SIZE):
+        assert results[rank].allclose(expected), (
+            f"rank {rank}: expected {expected_val}, got {results[rank][:4].tolist()}"
+        )
