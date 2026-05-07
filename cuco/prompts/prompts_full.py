@@ -158,8 +158,8 @@ FULL_SYS_FORMAT_NAMES = [
 
 FULL_ITER_MSG = """# Current program
 
-Here is the current program we are trying to improve (you will need to 
-propose a new program with the same inputs and outputs as the original 
+Here is the current program we are trying to improve (you will need to
+propose a new program with the same inputs and outputs as the original
 program, but with improved internal implementation):
 
 ```{language}
@@ -175,5 +175,5 @@ Here are the performance metrics of the program:
 Rewrite the program to improve its performance on the specified metrics.
 Provide the complete new program code.
 
-IMPORTANT: Make sure your rewritten program maintains the same inputs and outputs as the original program, but with improved internal implementation.
+IMPORTANT: You MUST emit a <DIRECTIVE> block before your <CODE> block declaring your optimization choices. Make sure your rewritten program maintains the same inputs and outputs as the original program, but with improved internal implementation.
 """

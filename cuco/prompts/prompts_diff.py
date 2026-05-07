@@ -67,5 +67,5 @@ Suggest a new idea to improve the performance of the code that is inspired by yo
 Your goal is to maximize the `combined_score` of the program.
 Describe each change with a SEARCH/REPLACE block.
 
-IMPORTANT: Do not rewrite the entire program - focus on targeted improvements.
+IMPORTANT: You MUST emit a <DIRECTIVE> block before your <DIFF> block declaring your optimization choices. Do not rewrite the entire program - focus on targeted improvements.
 """

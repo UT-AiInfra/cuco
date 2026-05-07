@@ -49,7 +49,7 @@ Here are the performance metrics of the program:
 Perform a cross-over between the code script above and the one below. Aim to combine the best parts of both code implementations that improves the score.
 Provide the complete new program code.
 
-IMPORTANT: Make sure your rewritten program maintains the same inputs and outputs as the original program, but with improved internal implementation.
+IMPORTANT: You MUST emit a <DIRECTIVE> block before your <CODE> block declaring your optimization choices. Make sure your rewritten program maintains the same inputs and outputs as the original program, but with improved internal implementation.
 """
 
 

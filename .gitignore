@@ -29,3 +29,19 @@ _transform_host_work/cuda_program
 _transform_host_output/ds_v3_moe_test
 results_*/best/ds_v3_moe
 results_*/gen_*/ds_v3_moe
+
+# Paper / venue submission (do not track or publish with code)
+neurips_paper/
+**/Formatting_Instructions*.zip
+**/neurips_paper*.zip
+myconversations.txt
+
+# Root-level draft PDFs / local logs (not source)
+/cuco.pdf
+
+# Naive prompting experiment logs & bulky local binaries under workload
+workloads/ds_v3_moe/naive_prompting_log.txt
+workloads/ds_v3_moe/test_host_moe
+workloads/ds_v3_moe/test_host_baseline
+workloads/ds_v3_moe/results_naive_prompting/
+workloads/ds_v3_moe/results_naive_prompting_old2/

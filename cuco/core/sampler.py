@@ -13,6 +13,7 @@ from cuco.prompts import (
     CROSS_SYS_FORMAT,
     CROSS_ITER_MSG,
     get_cross_component,
+    DIRECTIVE_PROMPT,
 )
 from cuco.prompts.prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
 import logging
@@ -29,6 +30,7 @@ class PromptSampler:
         patch_types: Optional[List[str]] = None,
         patch_type_probs: Optional[List[float]] = None,
         use_text_feedback: bool = False,
+        directive_enabled: bool = False,
     ):
         if patch_types is None:
             patch_types = ["diff"]
@@ -46,6 +48,7 @@ class PromptSampler:
                 f"Coding type probabilities must sum to 1.0, got {prob_sum:.6f}"
             )
         self.use_text_feedback = use_text_feedback
+        self.directive_enabled = directive_enabled
 
     def _resolve_task_sys_msg(self, island_idx: Optional[int] = None) -> str:
         """Resolve the task system message, checking per-island overrides first."""
@@ -114,6 +117,9 @@ class PromptSampler:
             sys_msg += selected_format
         elif patch_type == "cross":
             sys_msg += CROSS_SYS_FORMAT
+
+        if self.directive_enabled:
+            sys_msg += DIRECTIVE_PROMPT
 
         if len(archive_inspirations) > 0:
             eval_history_msg = construct_eval_history_msg(

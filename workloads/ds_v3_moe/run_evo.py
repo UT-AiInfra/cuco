@@ -470,6 +470,7 @@ def build_configs(
         max_novelty_attempts=5,
         code_embed_sim_threshold=0.995,
         use_text_feedback=True,
+        directive_enabled=True,
         embedding_model="bedrock-amazon.titan-embed-text-v1",
         pre_transform_enabled=True,
         pre_transform_pipeline_steps=["analyze", "host_to_device", "evolve_markers", "warmup"],

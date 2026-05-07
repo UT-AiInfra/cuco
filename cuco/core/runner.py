@@ -28,6 +28,7 @@ from cuco.edit import (
     redact_immutable,
 )
 from cuco.core.sampler import PromptSampler
+from cuco.prompts.directive import extract_directive_from_response
 from cuco.core.summarizer import MetaSummarizer
 from cuco.core.novelty_judge import NoveltyJudge
 from cuco.logo import print_gradient_logo
@@ -62,6 +63,7 @@ class EvolutionConfig:
     novelty_llm_models: Optional[List[str]] = None
     novelty_llm_kwargs: dict = field(default_factory=lambda: {})
     use_text_feedback: bool = False
+    directive_enabled: bool = False
 
     # Host-to-device pre-transformation settings
     pre_transform_enabled: bool = False  # Auto-transform host-side NCCL to GIN before evolution
@@ -245,6 +247,7 @@ class EvolutionRunner:
             patch_types=evo_config.patch_types,
             patch_type_probs=evo_config.patch_type_probs,
             use_text_feedback=evo_config.use_text_feedback,
+            directive_enabled=evo_config.directive_enabled,
         )
 
         # Initialize MetaSummarizer for meta-recommendations
@@ -1609,6 +1612,7 @@ class EvolutionRunner:
         )
         patch_name = None
         patch_description = None
+        directive_data = {}
         output_path_attempt = None
         patch_txt_attempt = None
         patch_path = None
@@ -1657,6 +1661,17 @@ class EvolutionRunner:
                 "</DESCRIPTION>",
                 False,
             )
+
+            # Extract optimization directive if enabled
+            if self.evo_config.directive_enabled:
+                directive_data = extract_directive_from_response(response.content)
+                if directive_data:
+                    logger.info(
+                        f"  Directive: backend={directive_data.get('backend', '?')}, "
+                        f"sync_mechanism={directive_data.get('sync_mechanism', '?')}, "
+                        f"placement={directive_data.get('placement', '?')}, "
+                        f"issuer={directive_data.get('issuer', '?')}"
+                    )
 
             # Apply the code patch (diff/full rewrite)
             (
@@ -1721,6 +1736,7 @@ class EvolutionRunner:
             "num_applied": num_applied_attempt,
             "patch_name": patch_name,
             "patch_description": patch_description,
+            "directive": directive_data if directive_data else None,
             "error_attempt": error_attempt,
             "novelty_attempt": novelty_attempt,
             "resample_attempt": resample_attempt,
